@@ -1,0 +1,34 @@
+# --- Secrets / credentials (NEVER commit) ---
+.env
+.env.*
+*.key
+*.pem
+secrets/
+credentials/
+broker_tokens/
+api_keys/
+
+# --- Python ---
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Node ---
+node_modules/
+
+# --- Logs / scratch ---
+*.log
+*.tmp
+
+# --- Superseded duplicate version files (canonical names are the source of truth) ---
+CONSTITUTION_v1.2.md
+SYSTEM_ARCHITECTURE_v1.2.md
+
+# --- OS ---
+.DS_Store
+Thumbs.db
