@@ -85,6 +85,25 @@ class CandidateTradeIntent(MoneyModel):
         # Same option type on both legs (vertical spread).
         if self.short_leg.option_type is not self.long_leg.option_type:
             raise ValueError("both legs must be the same option_type (vertical spread)")
+        # Equal contract counts on both legs — an unbalanced "spread" is really a naked
+        # residual (e.g. short 2 / long 1 leaves one short leg unprotected). Reject it so
+        # no undefined-risk residual can be constructed (review blocker 1).
+        if self.short_leg.contracts != self.long_leg.contracts:
+            raise ValueError(
+                "short_leg.contracts must equal long_leg.contracts "
+                "(unbalanced legs leave undefined-risk residual)"
+            )
+        # Direction must agree with option type (review blocker 2): a put credit spread is
+        # built from PUTs, a call credit spread from CALLs. A PUT_CREDIT made of CALLs is
+        # an incoherent intent and must not be constructible.
+        expected_option_type = (
+            OptionType.PUT if self.direction is SpreadDirection.PUT_CREDIT else OptionType.CALL
+        )
+        if self.short_leg.option_type is not expected_option_type:
+            raise ValueError(
+                f"{self.direction} requires {expected_option_type} legs, "
+                f"got {self.short_leg.option_type}"
+            )
         # Defined risk: credit cannot exceed width (otherwise max_loss is negative/nonsense).
         if self.net_credit >= self.spread_width:
             raise ValueError("net_credit must be less than spread_width (defined risk)")

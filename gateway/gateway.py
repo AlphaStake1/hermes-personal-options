@@ -22,8 +22,11 @@ Fail-closed posture:
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime
+
+from pydantic import ValidationError
 
 from schemas.audit_artifact import AuditArtifact
 from schemas.enums import ReasonCode
@@ -71,8 +74,14 @@ class ExecutionGateway:
         # --- run every gate (deterministic order; collect-all) ---------------
         # §1A account mode / minimum equity (may emit two distinct codes)
         add_all(gates.gate_account_mode(request.account))
-        # §2 instrument whitelist
-        add(gates.gate_instrument_permitted(request.instrument, request.candidate))
+        # §2 instrument whitelist + SPX Phase 2 gate
+        add(
+            gates.gate_instrument_permitted(
+                request.instrument,
+                request.candidate,
+                spx_phase_2_enabled=request.spx_phase_2_enabled,
+            )
+        )
         # §2A contract metadata
         add(gates.gate_contract_metadata(request.contract, request.candidate, as_of))
         # §3 short-strike delta band
@@ -126,7 +135,10 @@ class ExecutionGateway:
 
         Token minting is itself guarded: if a mint raises despite the gate passing
         (a logical contradiction), we fail closed and reject with the matching code
-        rather than letting an exception escape.
+        rather than letting an exception escape. We catch BOTH ValueError and pydantic
+        ValidationError (review blocker 4) — model_validator failures surface as
+        ValidationError, not ValueError, so catching only ValueError would let a real
+        contradiction crash the decision.
         """
         codes: list[ReasonCode] = []
 
@@ -136,38 +148,47 @@ class ExecutionGateway:
 
         try:
             approved_heat = request.heat.approve()
-        except ValueError:
+        except (ValueError, ValidationError):
             codes.append(ReasonCode.HEAT_LIMIT_EXCEEDED)
 
         try:
             certified_feed = request.feed_certification.to_live_token(
                 as_of, require_spx=request.require_spx_feed_coverage
             )
-        except ValueError:
+        except (ValueError, ValidationError):
             codes.append(ReasonCode.SECONDARY_FEED_NOT_CERTIFIED)
 
         try:
             live_strategy = request.strategy_stage.to_live_token()
-        except ValueError:
+        except (ValueError, ValidationError):
             codes.append(ReasonCode.STRATEGY_NOT_LIVE_APPROVED)
 
-        if codes or approved_heat is None or certified_feed is None or live_strategy is None:
-            return self._reject(request, codes or [ReasonCode.HUMAN_REARM_REQUIRED])
+        # Assembling the validated intent can itself raise (defense-in-depth validators).
+        if not codes and None not in (approved_heat, certified_feed, live_strategy):
+            try:
+                validated = ValidatedTradeIntent(
+                    candidate=request.candidate,
+                    approved_heat=approved_heat,
+                    certified_feed=certified_feed,
+                    live_strategy=live_strategy,
+                )
+                return GatewayDecision(approved=validated, rejection=None, reason_codes=())
+            except (ValueError, ValidationError):
+                codes.append(ReasonCode.INTERNAL_CONTRADICTION)
 
-        validated = ValidatedTradeIntent(
-            candidate=request.candidate,
-            approved_heat=approved_heat,
-            certified_feed=certified_feed,
-            live_strategy=live_strategy,
-        )
-        return GatewayDecision(approved=validated, rejection=None, reason_codes=())
+        # Reaching here means a gate passed but a token/assembly failed: a true internal
+        # contradiction. Use the dedicated code (review blocker 5) — never HUMAN_REARM_REQUIRED,
+        # which has specific §6 semantics and would be misleading in the audit trail.
+        if not codes:
+            codes.append(ReasonCode.INTERNAL_CONTRADICTION)
+        return self._reject(request, codes)
 
     def _reject(
         self, request: GatewayRequest, codes: list[ReasonCode]
     ) -> GatewayDecision:
         deduped: tuple[ReasonCode, ...] = tuple(dict.fromkeys(codes))
         artifact = AuditArtifact(
-            artifact_id=self._artifact_id(request),
+            artifact_id=self._artifact_id(request, deduped),
             created_at=request.as_of,
             decision="REJECT",
             reason_codes=deduped,
@@ -179,15 +200,19 @@ class ExecutionGateway:
         return GatewayDecision(approved=None, rejection=artifact, reason_codes=deduped)
 
     @staticmethod
-    def _artifact_id(request: GatewayRequest) -> str:
-        """Deterministic id from the decision inputs (no randomness, no clock).
+    def _artifact_id(
+        request: GatewayRequest, reason_codes: tuple[ReasonCode, ...]
+    ) -> str:
+        """Deterministic id hashed from the FULL request + decision content (blocker 6).
 
-        Reproducible: the same request yields the same id, which keeps the pure-function
-        property intact and makes tests stable.
+        Previously the id used only candidate/as_of/strikes, so two materially different
+        requests that happened to share those fields collided. We now hash the canonical
+        JSON of the entire request plus the ordered reason codes. Still fully deterministic
+        (no randomness, no clock beyond the request's own `as_of`), so the same request +
+        outcome always yields the same id and tests stay stable.
         """
+        payload = request.model_dump_json()
+        codes_str = ",".join(rc.value for rc in reason_codes)
+        digest = hashlib.sha256(f"{payload}|{codes_str}".encode("utf-8")).hexdigest()[:16]
         c = request.candidate
-        return (
-            f"gw-reject-{c.underlying}-{c.direction}-"
-            f"{request.as_of.isoformat()}-"
-            f"{c.short_leg.strike}/{c.long_leg.strike}"
-        )
+        return f"gw-reject-{c.underlying}-{c.direction}-{digest}"

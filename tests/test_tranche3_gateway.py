@@ -286,15 +286,15 @@ def test_reject_below_minimum_equity():
     assert ReasonCode.HUMAN_REARM_REQUIRED not in d.reason_codes
 
 
-def test_reject_instrument_mismatch():
-    # Instrument says XSP but candidate is SPX -> mismatch + (SPX contract metadata).
-    req = _request(
-        candidate=_candidate(underlying=Underlying.SPX),
-        contract=_contract(underlying=Underlying.SPX),
-    )
-    d = GW.validate(req)
-    assert not d.is_approved
-    assert ReasonCode.CONTRACT_METADATA_INVALID in d.reason_codes
+def test_reject_instrument_mismatch_is_construction_fail_closed():
+    # instrument.underlying != candidate.underlying is now rejected at GatewayRequest
+    # construction (fail-closed), so the inconsistent request cannot even be built.
+    with pytest.raises(Exception):
+        _request(
+            instrument=Instrument(underlying=Underlying.XSP),
+            candidate=_candidate(underlying=Underlying.SPX),
+            contract=_contract(underlying=Underlying.SPX),
+        )
 
 
 def test_reject_contract_not_mandate_compliant():
@@ -407,13 +407,19 @@ def test_reject_protection_no_long_leg():
     assert ReasonCode.PROTECTION_HIERARCHY_VIOLATION in d.reason_codes
 
 
-def test_reject_multi_leg_short_first():
-    # Construct a legging plan that puts the short leg first -> schema forbids it, so the
-    # offending object can't even be built; assert that fail-closed behavior.
+def test_reject_multi_leg_short_first_is_schema_level_fail_closed():
+    # CLARIFICATION (review blocker 10): the §7A long-leg-first rule is enforced at the
+    # SCHEMA level — a non-atomic legging plan with short_leg_first cannot be constructed
+    # at all (MultiLegPlan raises). The Gateway therefore never needs to emit a runtime
+    # reason code for it, because the offending object cannot reach the Gateway. This test
+    # documents that fail-closed boundary explicitly.
     with pytest.raises(Exception):
         MultiLegPlan(
             broker_confirms_atomic_combo=False, legging=True, long_leg_first=False
         )
+    # A well-formed legging plan (long leg first) constructs and is accepted by the gate.
+    ok = MultiLegPlan(broker_confirms_atomic_combo=False, legging=True, long_leg_first=True)
+    assert ok.rejection_reason is None
 
 
 def test_reject_entry_window_closed_before_open():
@@ -526,3 +532,132 @@ def test_rejection_artifact_always_carries_reason_codes():
     d = GW.validate(_request(liquidity=_liquidity(bid=Decimal("0.01"))))  # < min bid
     assert d.rejection is not None
     assert len(d.rejection.reason_codes) >= 1
+
+
+# --- v1.1 review-fix tests ---------------------------------------------------
+
+def test_candidate_rejects_unequal_contracts():
+    # Blocker 1: short 2 / long 1 leaves an unprotected short residual -> unconstructible.
+    with pytest.raises(Exception):
+        _candidate(
+            short_leg=SpreadLeg(side=LegSide.SHORT, option_type=OptionType.PUT,
+                                strike=Decimal("495"), delta=Decimal("-0.08"), contracts=2),
+            long_leg=SpreadLeg(side=LegSide.LONG, option_type=OptionType.PUT,
+                               strike=Decimal("490"), delta=Decimal("-0.05"), contracts=1),
+        )
+
+
+def test_candidate_rejects_direction_optiontype_mismatch():
+    # Blocker 2: PUT_CREDIT built from CALL legs is incoherent -> unconstructible.
+    with pytest.raises(Exception):
+        _candidate(
+            direction=SpreadDirection.PUT_CREDIT,
+            short_leg=SpreadLeg(side=LegSide.SHORT, option_type=OptionType.CALL,
+                                strike=Decimal("505"), delta=Decimal("0.08"), contracts=1),
+            long_leg=SpreadLeg(side=LegSide.LONG, option_type=OptionType.CALL,
+                               strike=Decimal("510"), delta=Decimal("0.05"), contracts=1),
+        )
+
+
+def _call_credit_candidate(**over):
+    base = dict(
+        underlying=Underlying.XSP, direction=SpreadDirection.CALL_CREDIT,
+        short_leg=SpreadLeg(side=LegSide.SHORT, option_type=OptionType.CALL,
+                            strike=Decimal("505"), delta=Decimal("0.08"), contracts=1),
+        long_leg=SpreadLeg(side=LegSide.LONG, option_type=OptionType.CALL,
+                           strike=Decimal("510"), delta=Decimal("0.05"), contracts=1),
+        net_credit=Decimal("0.50"), multiplier=100, dte=2,
+    )
+    base.update(over)
+    return CandidateTradeIntent(**base)
+
+
+def test_call_credit_with_call_legs_constructs():
+    # Positive: a coherent CALL_CREDIT (CALL legs, long above short) is valid.
+    c = _call_credit_candidate()
+    assert c.direction is SpreadDirection.CALL_CREDIT
+
+
+def test_reject_spx_without_phase2():
+    # Blocker 3: SPX candidate with spx_phase_2_enabled=False -> INSTRUMENT_NOT_PERMITTED.
+    # SPX feed coverage is derived True, and the baseline feed cert covers only XSP, so the
+    # feed-cert gate also fires; both are expected.
+    req = _request(
+        instrument=Instrument(underlying=Underlying.SPX),
+        candidate=_candidate(underlying=Underlying.SPX),
+        contract=_contract(underlying=Underlying.SPX),
+        spx_phase_2_enabled=False,
+    )
+    d = GW.validate(req)
+    assert not d.is_approved
+    assert ReasonCode.INSTRUMENT_NOT_PERMITTED in d.reason_codes
+
+
+def test_spx_with_phase2_and_spx_coverage_passes_instrument_gate():
+    # Blocker 3 positive: with Phase 2 enabled AND SPX feed coverage, instrument gate clears.
+    req = _request(
+        instrument=Instrument(underlying=Underlying.SPX),
+        candidate=_candidate(underlying=Underlying.SPX),
+        contract=_contract(underlying=Underlying.SPX),
+        spx_phase_2_enabled=True,
+        feed_certification=_feed_cert(
+            coverage=FeedCoverageStatus(
+                covers_xsp=True, covers_spx=True, symbol_mapping_consistent=True
+            )
+        ),
+    )
+    d = GW.validate(req)
+    assert ReasonCode.INSTRUMENT_NOT_PERMITTED not in d.reason_codes
+    assert ReasonCode.SECONDARY_FEED_NOT_CERTIFIED not in d.reason_codes
+
+
+def test_require_spx_feed_coverage_is_derived_not_manual():
+    # Blocker 3: the flag is a derived property of the candidate underlying, not an input.
+    xsp_req = _request()
+    assert xsp_req.require_spx_feed_coverage is False
+    # And it cannot be passed as a field (extra='forbid').
+    with pytest.raises(Exception):
+        _request(require_spx_feed_coverage=True)
+
+
+def test_ct_minutes_bounds_enforced():
+    # Blocker 7: out-of-range wall-clock minute rejected at construction.
+    with pytest.raises(Exception):
+        _request(ct_minutes_since_midnight=1440)
+    with pytest.raises(Exception):
+        _request(ct_minutes_since_midnight=-1)
+
+
+def test_zero_dte_after_2pm_flag_must_match_derived():
+    # Blocker 8: an explicit flag inconsistent with (dte==0 and ct>=14:00) is rejected.
+    # Baseline is dte=2 midday, so derived=False; passing True must raise.
+    with pytest.raises(Exception):
+        _request(is_zero_dte_after_2pm_ct=True)
+
+
+def test_zero_dte_after_2pm_derives_true_consistently():
+    # Blocker 8 positive: dte=0 at 14:30 CT -> derived True; matching flag constructs.
+    req = _request(
+        candidate=_candidate(dte=0),
+        ct_minutes_since_midnight=14 * 60 + 30,
+        is_zero_dte_after_2pm_ct=True,
+    )
+    assert req.derived_zero_dte_after_2pm_ct is True
+
+
+def test_artifact_id_is_content_hashed_and_distinguishes_requests():
+    # Blocker 6: two rejections differing only in a non-strike field get different ids.
+    r1 = _request(ct_minutes_since_midnight=8 * 60)               # window closed
+    r2 = _request(ct_minutes_since_midnight=8 * 60,
+                  heat=_heat(sum_defined_max_loss=Decimal("2000")))  # window + heat
+    d1 = GW.validate(r1)
+    d2 = GW.validate(r2)
+    assert d1.rejection.artifact_id != d2.rejection.artifact_id
+    # Still deterministic: same request -> same id.
+    assert GW.validate(r1).rejection.artifact_id == d1.rejection.artifact_id
+
+
+def test_internal_contradiction_code_exists_and_not_human_rearm():
+    # Blocker 5: the fallback code is the dedicated INTERNAL_CONTRADICTION, not HUMAN_REARM_REQUIRED.
+    assert hasattr(ReasonCode, "INTERNAL_CONTRADICTION")
+    assert ReasonCode.INTERNAL_CONTRADICTION.value == "INTERNAL_CONTRADICTION"

@@ -25,7 +25,7 @@ from schemas.broker_data_snapshot import BrokerDataSnapshot
 from schemas.concentration_limits import ConcentrationSnapshot
 from schemas.contract_metadata import ContractMetadata
 from schemas.drawdown_state import DrawdownHaltState
-from schemas.enums import ReasonCode
+from schemas.enums import ReasonCode, Underlying
 from schemas.event_blackout import EventBlackoutCalendar
 from schemas.instrument import Instrument
 from schemas.liquidity_gate import ExecutionQualityState, LiquidityGate
@@ -61,19 +61,24 @@ def gate_account_mode(account: AccountState) -> list[ReasonCode]:
 # --- §2 instrument whitelist ------------------------------------------------
 
 def gate_instrument_permitted(
-    instrument: Instrument, candidate: CandidateTradeIntent
+    instrument: Instrument,
+    candidate: CandidateTradeIntent,
+    *,
+    spx_phase_2_enabled: bool,
 ) -> ReasonCode | None:
-    """§2: underlying must be on the permitted whitelist AND match the candidate.
+    """§2: underlying must be permitted, match the candidate, and (for SPX) be Phase-2 enabled.
 
     Existence as an `Underlying` already implies the enum whitelist; this also guards a
-    mismatch between the instrument object and the candidate's underlying, and blocks any
-    underlying not yet permitted (e.g. SPX before Phase 2 enablement is a separate gate;
-    here we enforce the global permitted set).
+    mismatch between the instrument object and the candidate's underlying. SPX is Phase 2
+    and is rejected unless `spx_phase_2_enabled` is True (review blocker 3) — a distinct
+    INSTRUMENT_NOT_PERMITTED code makes the Phase-2 gate legible in the audit trail.
     """
     if not instrument.is_permitted:
-        return ReasonCode.CONTRACT_METADATA_INVALID
+        return ReasonCode.INSTRUMENT_NOT_PERMITTED
     if instrument.underlying is not candidate.underlying:
-        return ReasonCode.CONTRACT_METADATA_INVALID
+        return ReasonCode.INSTRUMENT_NOT_PERMITTED
+    if candidate.underlying is Underlying.SPX and not spx_phase_2_enabled:
+        return ReasonCode.INSTRUMENT_NOT_PERMITTED
     return None
 
 
