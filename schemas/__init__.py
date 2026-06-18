@@ -21,7 +21,7 @@ from .execution_result import ExecutionResult
 from .human_required_event import HumanRequiredEvent
 from .instrument import Instrument
 from .liquidity_gate import ExecutionQualityRearmToken, ExecutionQualityState, LiquidityGate
-from .order_ticket import OrderTicket
+from .order_ticket import OrderLeg, OrderLegRole, OrderRouteDecision, OrderTicket, RouteMode
 from .order_type_policy import OrderTypePolicy
 from .portfolio_heat import ApprovedPortfolioHeat, PortfolioHeatCheck
 from .price_reconciliation import PriceReconciliationCheck
@@ -51,8 +51,9 @@ __all__ = [
     "EventBlackoutCalendar",
     # tranche-2 trade + audit
     "SpreadLeg", "CandidateTradeIntent", "ValidatedTradeIntent", "RiskPayload",
-    "ApprovalPolicy", "OrderTicket", "ExecutionResult", "AuditArtifact",
-    "HumanRequiredEvent", "PromotionDrillResult", "DailyRationale",
+    "ApprovalPolicy", "OrderLeg", "OrderLegRole", "OrderRouteDecision", "OrderTicket",
+    "RouteMode", "ExecutionResult", "AuditArtifact", "HumanRequiredEvent",
+    "PromotionDrillResult", "DailyRationale",
     # enums
     "AccountType", "CertificationStatus", "DrawdownTier", "EmergencyState",
     "ExecutionStatus", "ExerciseStyle", "FeedProvider", "HaltAction", "HumanRequiredKind",
