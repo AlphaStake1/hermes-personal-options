@@ -1,9 +1,10 @@
-"""Tranche 3 — Execution Gateway pre-trade validation (v1.2)."""
+"""Tranche 3 — Execution Gateway pre-trade validation (v1.3)."""
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -21,8 +22,20 @@ from schemas import (
 )
 
 UTC = timezone.utc
+CT = ZoneInfo("America/Chicago")
+
+# June 2026 is CDT (UTC-5). All "CT" times below use that offset.
+# NOW = 17:30 UTC = 12:30 CT — inside entry window, suitable as the default as_of.
 NOW = datetime(2026, 6, 17, 17, 30, tzinfo=UTC)
-CT_MIDDAY_MIN = 11 * 60
+
+# Convenience as_of instants for gate-boundary tests (all CDT = UTC-5 in June).
+_AS_OF_CT_0830 = datetime(2026, 6, 17, 13, 30, tzinfo=UTC)  # 08:30 CT — before window
+_AS_OF_CT_0930 = datetime(2026, 6, 17, 14, 30, tzinfo=UTC)  # 09:30 CT — before window
+_AS_OF_CT_1100 = datetime(2026, 6, 17, 16,  0, tzinfo=UTC)  # 11:00 CT — in window
+_AS_OF_CT_1401 = datetime(2026, 6, 17, 19,  1, tzinfo=UTC)  # 14:01 CT — after 2 PM CT
+_AS_OF_CT_1430 = datetime(2026, 6, 17, 19, 30, tzinfo=UTC)  # 14:30 CT — after 2 PM CT
+_AS_OF_CT_1530 = datetime(2026, 6, 17, 20, 30, tzinfo=UTC)  # 15:30 CT — after entry window
+
 # Expiration 2 calendar days out -> derived DTE = 2 to match candidate default.
 EXP = datetime(2026, 6, 19, 20, 0, tzinfo=UTC)
 
@@ -80,12 +93,13 @@ def _spread_contract(short_strike="495", long_strike="490", option_type=OptionTy
     return SpreadContractMetadata(**base)
 
 
-def _snapshot(**over):
+def _snapshot(as_of=NOW, **over):
+    """Build a BrokerDataSnapshot with timestamps fresh relative to `as_of`."""
     base = dict(
-        option_quote_ts=NOW - timedelta(milliseconds=200),
-        underlying_price_ts=NOW - timedelta(milliseconds=200),
-        vix_ts=NOW - timedelta(milliseconds=1000),
-        iv_rank_ts=NOW - timedelta(milliseconds=2000),
+        option_quote_ts=as_of - timedelta(milliseconds=200),
+        underlying_price_ts=as_of - timedelta(milliseconds=200),
+        vix_ts=as_of - timedelta(milliseconds=1000),
+        iv_rank_ts=as_of - timedelta(milliseconds=2000),
         iv_rank_inputs_fresh=True, iv_rank_value=Decimal("85"),
     )
     base.update(over)
@@ -174,16 +188,18 @@ def _spx_policy(**over):
 
 
 def _request(**over):
+    """Build a GatewayRequest. as_of defaults to NOW (12:30 CT — inside entry window).
+    ct_minutes_since_midnight is NOT a valid field; it is derived from as_of by the model."""
+    as_of = over.get("as_of", NOW)
     base = dict(
-        candidate=_candidate(), as_of=NOW, account=_account(), heat=_heat(),
+        candidate=_candidate(), as_of=as_of, account=_account(), heat=_heat(),
         drawdown=DrawdownHaltState(), instrument=Instrument(underlying=Underlying.XSP),
         spread_contract=_spread_contract(), underlying_policy=_policy(),
-        data_snapshot=_snapshot(), reconciliation=_reconciliation(),
+        data_snapshot=_snapshot(as_of=as_of), reconciliation=_reconciliation(),
         liquidity=_liquidity(), execution_quality=_exec_quality(),
         concentration=_concentration(), protection=_protection(), multi_leg=_multi_leg(),
         strategy_stage=StrategyStageState(stage=StrategyStage.LIVE),
         feed_certification=_feed_cert(), event_calendar=_calendar(),
-        ct_minutes_since_midnight=CT_MIDDAY_MIN,
     )
     base.update(over)
     return GatewayRequest(**base)
@@ -278,7 +294,8 @@ def test_reject_protection_no_long_leg():
 
 
 def test_reject_entry_window_closed():
-    d = GW.validate(_request(ct_minutes_since_midnight=9 * 60 + 30))
+    # 09:30 CT is before the 09:45 CT open — entry window must be closed.
+    d = GW.validate(_request(as_of=_AS_OF_CT_0930))
     assert ReasonCode.ENTRY_WINDOW_CLOSED in d.reason_codes
 
 
@@ -353,13 +370,15 @@ def test_request_rejects_unknown_field():
 
 
 def test_collect_all_reason_codes():
+    as_of_8_ct = datetime(2026, 6, 17, 13, 0, tzinfo=UTC)  # 08:00 CT — before window
     d = GW.validate(_request(
+        as_of=as_of_8_ct,
+        data_snapshot=_snapshot(as_of=as_of_8_ct),
         candidate=_candidate(short_leg=SpreadLeg(side=LegSide.SHORT,
             option_type=OptionType.PUT, strike=Decimal("495"),
             delta=Decimal("-0.25"), contracts=1)),
         heat=_heat(sum_defined_max_loss=Decimal("2000")),
-        liquidity=_liquidity(open_interest=10),
-        ct_minutes_since_midnight=8 * 60))
+        liquidity=_liquidity(open_interest=10)))
     for code in (ReasonCode.DELTA_BAND_VIOLATION, ReasonCode.HEAT_LIMIT_EXCEEDED,
                  ReasonCode.LIQUIDITY_GATE_FAILED, ReasonCode.ENTRY_WINDOW_CLOSED):
         assert code in d.reason_codes
@@ -367,8 +386,9 @@ def test_collect_all_reason_codes():
 
 
 def test_artifact_id_content_hashed():
-    r1 = _request(ct_minutes_since_midnight=8 * 60)
-    r2 = _request(ct_minutes_since_midnight=8 * 60,
+    as_of_8_ct = datetime(2026, 6, 17, 13, 0, tzinfo=UTC)  # 08:00 CT
+    r1 = _request(as_of=as_of_8_ct, data_snapshot=_snapshot(as_of=as_of_8_ct))
+    r2 = _request(as_of=as_of_8_ct, data_snapshot=_snapshot(as_of=as_of_8_ct),
                   heat=_heat(sum_defined_max_loss=Decimal("2000")))
     assert GW.validate(r1).rejection.artifact_id != GW.validate(r2).rejection.artifact_id
     assert GW.validate(r1).rejection.artifact_id == GW.validate(r1).rejection.artifact_id
@@ -447,34 +467,104 @@ def test_dte_claim_0_but_derived_1_rejected():
 
 
 def test_zero_dte_after_2pm_uses_derived_dte_not_candidate():
-    # Derived DTE 0 (expires today) at 14:30 CT -> late-day tightening on (500ms).
-    exp0 = NOW
+    # 14:30 CT (19:30 UTC), 0-DTE contract -> late-day tightening applies (500ms threshold).
+    as_of_late = _AS_OF_CT_1430
+    exp0 = datetime(2026, 6, 17, 20, 0, tzinfo=UTC)  # expires same day (after as_of)
     req = _request(
+        as_of=as_of_late,
         candidate=_candidate(dte=0),
         spread_contract=_spread_contract(exp=exp0),
-        ct_minutes_since_midnight=14 * 60 + 30,
-        data_snapshot=_snapshot(option_quote_ts=NOW - timedelta(milliseconds=700)))
+        data_snapshot=_snapshot(as_of=as_of_late,
+                                option_quote_ts=as_of_late - timedelta(milliseconds=700)))
     assert req.is_zero_dte_after_2pm_ct is True
     d = GW.validate(req)
     assert ReasonCode.PRICE_STALE in d.reason_codes
 
 
 def test_derived_zero_dte_flag_cases():
-    r_before = _request(candidate=_candidate(dte=0), spread_contract=_spread_contract(exp=NOW),
-                        ct_minutes_since_midnight=11 * 60)
+    exp0 = datetime(2026, 6, 17, 20, 0, tzinfo=UTC)
+    # 11:00 CT — before the 14:00 threshold, 0-DTE flag must be False.
+    r_before = _request(as_of=_AS_OF_CT_1100, data_snapshot=_snapshot(as_of=_AS_OF_CT_1100),
+                        candidate=_candidate(dte=0), spread_contract=_spread_contract(exp=exp0))
     assert r_before.is_zero_dte_after_2pm_ct is False
-    r_after = _request(candidate=_candidate(dte=0), spread_contract=_spread_contract(exp=NOW),
-                       ct_minutes_since_midnight=14 * 60 + 1)
+    # 14:01 CT — after the threshold, 0-DTE flag must be True.
+    r_after = _request(as_of=_AS_OF_CT_1401, data_snapshot=_snapshot(as_of=_AS_OF_CT_1401),
+                       candidate=_candidate(dte=0), spread_contract=_spread_contract(exp=exp0))
     assert r_after.is_zero_dte_after_2pm_ct is True
-    r_1dte = _request(candidate=_candidate(dte=1),
-                      spread_contract=_spread_contract(exp=NOW + timedelta(days=1)),
-                      ct_minutes_since_midnight=14 * 60 + 1)
+    # 14:01 CT but 1-DTE — flag must be False regardless of CT time.
+    r_1dte = _request(as_of=_AS_OF_CT_1401, data_snapshot=_snapshot(as_of=_AS_OF_CT_1401),
+                      candidate=_candidate(dte=1),
+                      spread_contract=_spread_contract(exp=_AS_OF_CT_1401 + timedelta(days=1)))
     assert r_1dte.is_zero_dte_after_2pm_ct is False
 
 
 def test_is_zero_dte_after_2pm_ct_not_an_input_field():
     with pytest.raises(Exception):
         _request(is_zero_dte_after_2pm_ct=True)
+
+
+# --- v1.3 CT derivation tests -----------------------------------------------
+
+def test_ct_minutes_since_midnight_is_derived_from_as_of():
+    # NOW is 17:30 UTC = 12:30 CT (CDT, UTC-5 in June).
+    req = _request()
+    assert req.ct_minutes_since_midnight == 12 * 60 + 30
+
+
+def test_ct_minutes_since_midnight_not_an_input_field():
+    with pytest.raises(Exception):
+        _request(ct_minutes_since_midnight=11 * 60)
+
+
+def test_entry_window_uses_derived_ct_time_not_spoofable():
+    # 15:30 CT is outside the entry window. Passing a fake in-window minute must be
+    # rejected by extra="forbid" — there is no field to accept it.
+    as_of_1530 = _AS_OF_CT_1530
+    with pytest.raises(Exception):
+        _request(as_of=as_of_1530, data_snapshot=_snapshot(as_of=as_of_1530),
+                 ct_minutes_since_midnight=11 * 60)
+    # Without the spoofed field, the request constructs fine but the gate rejects it.
+    d = GW.validate(_request(as_of=as_of_1530, data_snapshot=_snapshot(as_of=as_of_1530)))
+    assert ReasonCode.ENTRY_WINDOW_CLOSED in d.reason_codes
+
+
+def test_ct_derivation_dst_sanity_america_chicago():
+    # Summer: June 17, 17:30 UTC = 12:30 CDT (UTC-5)
+    summer = _request(as_of=datetime(2026, 6, 17, 17, 30, tzinfo=UTC))
+    # Winter: Dec 17, 18:30 UTC = 12:30 CST (UTC-6)
+    winter_as_of = datetime(2026, 12, 17, 18, 30, tzinfo=UTC)
+    winter_exp = datetime(2026, 12, 19, 21, 0, tzinfo=UTC)  # 2 days out in UTC
+    winter = _request(
+        as_of=winter_as_of,
+        data_snapshot=_snapshot(as_of=winter_as_of),
+        candidate=_candidate(dte=2),
+        spread_contract=_spread_contract(exp=winter_exp))
+    assert summer.ct_minutes_since_midnight == 12 * 60 + 30
+    assert winter.ct_minutes_since_midnight == 12 * 60 + 30
+
+
+# --- v1.3 contract metadata consistency tests --------------------------------
+
+def test_contract_rejects_expiration_date_time_mismatch():
+    with pytest.raises(Exception):
+        _contract("495", expiration_date=EXP + timedelta(days=1), expiration_time=EXP)
+
+
+def test_spread_contract_rejects_mismatched_expiration_date():
+    with pytest.raises(Exception):
+        SpreadContractMetadata(
+            short_contract=_contract("495"),
+            long_contract=_contract("490",
+                                    expiration_date=EXP + timedelta(days=1),
+                                    expiration_time=EXP + timedelta(days=1),
+                                    last_trading_time=EXP + timedelta(days=1)))
+
+
+def test_spread_contract_rejects_mismatched_last_trading_time():
+    with pytest.raises(Exception):
+        SpreadContractMetadata(
+            short_contract=_contract("495"),
+            long_contract=_contract("490", last_trading_time=EXP - timedelta(minutes=5)))
 
 
 # Blocker 7: AllowedUnderlyingPolicy governance object.

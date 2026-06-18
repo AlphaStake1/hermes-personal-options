@@ -23,8 +23,10 @@ Design notes
 from __future__ import annotations
 
 from datetime import datetime
+from typing import ClassVar
+from zoneinfo import ZoneInfo
 
-from pydantic import AwareDatetime, Field, model_validator
+from pydantic import AwareDatetime, model_validator
 
 from schemas.account_state import AccountState
 from schemas.allowed_underlying_policy import AllowedUnderlyingPolicy
@@ -88,26 +90,34 @@ class GatewayRequest(HermesModel):
     # --- macro calendar (Constitution §9A) -----------------------------------
     event_calendar: EventBlackoutCalendar
 
-    # --- §9 entry-window context ---------------------------------------------
-    # The current time in US/Central as wall-clock minutes-since-midnight, supplied by
-    # deterministic code (avoids bundling a tz database into the validator). The Gateway
-    # checks this against the 09:45 CT entry window. Bounded to a valid wall-clock minute
-    # 0..1439 (review v1.1 blocker 7) so a corrupt time can't silently pass the window gate.
-    ct_minutes_since_midnight: int = Field(ge=0, le=1439)
-
-    # NOTE: there is intentionally NO is_zero_dte_after_2pm_ct input field anymore
-    # (review v1.2 blocker 6). It is a derived property only; passing it is rejected by
-    # extra="forbid". NOTE: there is also no spx_phase_2_enabled bool anymore — that is
-    # now governed by underlying_policy (blocker 7).
+    # NOTE: ct_minutes_since_midnight is NOT an input field (removed in v1.3, review blocker).
+    # Passing it is rejected by extra="forbid". It is a derived property only, computed from
+    # as_of via ZoneInfo("America/Chicago") — a caller-supplied value could contradict as_of
+    # and bypass both the entry-window gate and the late-day 0-DTE freshness tightening.
+    # NOTE: is_zero_dte_after_2pm_ct is also a derived property only (removed in v1.2 blocker 6).
+    # NOTE: spx_phase_2_enabled is now governed by underlying_policy (blocker 7).
 
     # 14:00 CT in minutes-since-midnight (the §10 late-day 0-DTE threshold).
-    _AFTER_2PM_CT_MIN: int = 14 * 60
+    _AFTER_2PM_CT_MIN: ClassVar[int] = 14 * 60
+    _CT_ZONE: ClassVar[ZoneInfo] = ZoneInfo("America/Chicago")
 
     @property
     def derived_dte(self) -> int:
         """Authoritative DTE from deterministic contract metadata + as_of (blocker 4).
         candidate.dte is a CLAIM cross-checked against this; this is the source of truth."""
         return self.spread_contract.derived_dte(self.as_of)
+
+    @property
+    def ct_minutes_since_midnight(self) -> int:
+        """Current time in CT as minutes since midnight, DERIVED from as_of (v1.3 blocker fix).
+
+        This is NOT an input field — it is always computed from as_of via
+        ZoneInfo("America/Chicago"). A caller-supplied value could contradict as_of and
+        silently bypass the entry-window gate and the late-day 0-DTE freshness tightening.
+        Handles DST transitions correctly because ZoneInfo uses IANA tz data.
+        """
+        ct = self.as_of.astimezone(self._CT_ZONE)
+        return ct.hour * 60 + ct.minute
 
     @property
     def require_spx_feed_coverage(self) -> bool:

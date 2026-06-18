@@ -66,6 +66,15 @@ class ContractMetadata(HermesModel):
         # last trading time cannot be after the expiry instant
         if self.last_trading_time > self.expiration_time:
             raise ValueError("last_trading_time cannot be after expiration_time")
+        # expiration_date and expiration_time must refer to the same calendar date (UTC).
+        # Allowing them to diverge creates a silent inconsistency: DTE is computed from
+        # expiration_time.date(), but expiration_date could point to a different day, making
+        # contract-metadata checks non-deterministic.
+        if self.expiration_date.date() != self.expiration_time.date():
+            raise ValueError(
+                "expiration_date.date() must equal expiration_time.date() "
+                f"({self.expiration_date.date()} != {self.expiration_time.date()})"
+            )
         return self
 
 
@@ -95,6 +104,23 @@ class SpreadContractMetadata(HermesModel):
             raise ValueError("spread legs must share the same option_type (vertical)")
         if self.short_contract.expiration_time != self.long_contract.expiration_time:
             raise ValueError("spread legs must share the same expiration_time (vertical)")
+        # expiration_date must match between legs (v1.3 metadata consistency hardening).
+        # A spread where the two legs nominally expire on different calendar dates is
+        # internally incoherent — the Gateway must fail closed rather than silently
+        # approve based on whichever leg's date happens to be used downstream.
+        if self.short_contract.expiration_date != self.long_contract.expiration_date:
+            raise ValueError(
+                "spread legs must share the same expiration_date "
+                f"({self.short_contract.expiration_date} != {self.long_contract.expiration_date})"
+            )
+        # last_trading_time must match between legs for the same reason: any downstream
+        # logic that checks tradability (e.g. is_tradable_as_of) could return different
+        # results per-leg, making the spread's overall tradability non-deterministic.
+        if self.short_contract.last_trading_time != self.long_contract.last_trading_time:
+            raise ValueError(
+                "spread legs must share the same last_trading_time "
+                f"({self.short_contract.last_trading_time} != {self.long_contract.last_trading_time})"
+            )
         return self
 
     @property
