@@ -8,10 +8,13 @@ every Constitution gate in deterministic order, and either:
     LiveStrategyToken) into a `ValidatedTradeIntent`, or
   * returns a rejection `AuditArtifact` carrying ALL failing normalized ReasonCodes.
 
-Scope of this tranche (pre-trade validation core ONLY):
-  * NO broker calls, NO Temporal workflows, NO order submission.
-  * NO order-type routing / OrderTicket minting (next tranche, post-review).
-  * NO side effects of any kind — `validate()` is a pure function of its inputs.
+Post-validation routing remains deterministic and pre-submission:
+
+  * `mint_order_ticket()` consumes only a `ValidatedTradeIntent` plus deterministic
+    `OrderRoutingState`.
+  * It performs NO broker calls, NO Temporal workflows, and NO order submission.
+  * MARKET is never LLM/request-text unlockable; it is reachable only from explicit
+    deterministic emergency policy state.
 
 The Gateway never trusts an LLM. Every input is a strict, frozen Pydantic model; an
 LLM may only supply the `CandidateTradeIntent`. All risk/safety state is supplied by
@@ -21,6 +24,14 @@ deterministic code (Constitution §0.1, §17).
 from __future__ import annotations
 
 from .gateway import ExecutionGateway, GatewayDecision
+from .order_routing import OrderRoutingState, decide_order_route, mint_order_ticket
 from .request import GatewayRequest
 
-__all__ = ["ExecutionGateway", "GatewayDecision", "GatewayRequest"]
+__all__ = [
+    "ExecutionGateway",
+    "GatewayDecision",
+    "GatewayRequest",
+    "OrderRoutingState",
+    "decide_order_route",
+    "mint_order_ticket",
+]
