@@ -26,7 +26,7 @@ from schemas.broker_data_snapshot import BrokerDataSnapshot
 from schemas.concentration_limits import ConcentrationSnapshot
 from schemas.contract_metadata import SpreadContractMetadata
 from schemas.drawdown_state import DrawdownHaltState
-from schemas.enums import ReasonCode, Underlying
+from schemas.enums import ReasonCode
 from schemas.event_blackout import EventBlackoutCalendar
 from schemas.instrument import Instrument
 from schemas.liquidity_gate import ExecutionQualityState, LiquidityGate
