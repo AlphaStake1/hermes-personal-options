@@ -43,6 +43,17 @@ class SpreadLeg(MoneyModel):
     delta: Decimal  # signed; puts negative, calls positive
     contracts: int = Field(gt=0)
 
+    @model_validator(mode="after")
+    def _delta_sign_matches_option_type(self) -> "SpreadLeg":
+        # Review v1.2 blocker 2: option delta sign must be consistent with option type.
+        # PUT deltas are <= 0; CALL deltas are >= 0. Applies to BOTH short and long legs.
+        # (0 is permitted at the boundary — a far-OTM leg can round to 0 delta.)
+        if self.option_type is OptionType.PUT and self.delta > 0:
+            raise ValueError(f"PUT leg delta must be <= 0, got {self.delta}")
+        if self.option_type is OptionType.CALL and self.delta < 0:
+            raise ValueError(f"CALL leg delta must be >= 0, got {self.delta}")
+        return self
+
 
 class CandidateTradeIntent(MoneyModel):
     """LLM/orchestrator proposal. No order_type, no approval tokens — cannot be routed.

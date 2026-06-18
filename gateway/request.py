@@ -27,11 +27,12 @@ from datetime import datetime
 from pydantic import AwareDatetime, Field, model_validator
 
 from schemas.account_state import AccountState
+from schemas.allowed_underlying_policy import AllowedUnderlyingPolicy
 from schemas.base import HermesModel
 from schemas.enums import Underlying
 from schemas.broker_data_snapshot import BrokerDataSnapshot
 from schemas.concentration_limits import ConcentrationSnapshot
-from schemas.contract_metadata import ContractMetadata
+from schemas.contract_metadata import SpreadContractMetadata
 from schemas.drawdown_state import DrawdownHaltState
 from schemas.event_blackout import EventBlackoutCalendar
 from schemas.instrument import Instrument
@@ -60,7 +61,12 @@ class GatewayRequest(HermesModel):
 
     # --- instrument & contract (Constitution §2, §2A) ------------------------
     instrument: Instrument
-    contract: ContractMetadata
+    # Both-leg deterministic contract metadata (review v1.2 blocker 3). Matched against
+    # the candidate spread; also the authoritative source of DTE (blocker 4).
+    spread_contract: SpreadContractMetadata
+    # Governance policy controlling which underlyings may trade (review v1.2 blocker 7).
+    # Replaces the old bare spx_phase_2_enabled bool with an auditable config object.
+    underlying_policy: AllowedUnderlyingPolicy
 
     # --- data integrity (Constitution §10, §11) ------------------------------
     data_snapshot: BrokerDataSnapshot
@@ -86,47 +92,46 @@ class GatewayRequest(HermesModel):
     # The current time in US/Central as wall-clock minutes-since-midnight, supplied by
     # deterministic code (avoids bundling a tz database into the validator). The Gateway
     # checks this against the 09:45 CT entry window. Bounded to a valid wall-clock minute
-    # 0..1439 (review blocker 7) so a corrupt time can't silently pass the window gate.
+    # 0..1439 (review v1.1 blocker 7) so a corrupt time can't silently pass the window gate.
     ct_minutes_since_midnight: int = Field(ge=0, le=1439)
 
-    # Late-day 0-DTE freshness tightening (§10). This is DERIVED, not free input
-    # (review blocker 8): it must equal (dte == 0 AND ct time >= 14:00 CT). Callers may
-    # omit it (defaults False and is then cross-checked) or pass it for explicitness;
-    # an inconsistent explicit value is rejected so the flag can't drift from the clock.
-    is_zero_dte_after_2pm_ct: bool = False
-
-    # --- §2 SPX Phase 2 control ----------------------------------------------
-    # SPX is gated behind an explicit Phase 2 enable (review blocker 3). Default False
-    # (Phase 1 = XSP only). When the candidate underlying is SPX and this is False, the
-    # Gateway rejects with INSTRUMENT_NOT_PERMITTED. SPX feed coverage is NOT a separate
-    # manual flag — it is DERIVED from the candidate underlying (see require_spx_feed_coverage).
-    spx_phase_2_enabled: bool = False
+    # NOTE: there is intentionally NO is_zero_dte_after_2pm_ct input field anymore
+    # (review v1.2 blocker 6). It is a derived property only; passing it is rejected by
+    # extra="forbid". NOTE: there is also no spx_phase_2_enabled bool anymore — that is
+    # now governed by underlying_policy (blocker 7).
 
     # 14:00 CT in minutes-since-midnight (the §10 late-day 0-DTE threshold).
     _AFTER_2PM_CT_MIN: int = 14 * 60
 
     @property
+    def derived_dte(self) -> int:
+        """Authoritative DTE from deterministic contract metadata + as_of (blocker 4).
+        candidate.dte is a CLAIM cross-checked against this; this is the source of truth."""
+        return self.spread_contract.derived_dte(self.as_of)
+
+    @property
     def require_spx_feed_coverage(self) -> bool:
-        """§11: SPX feed coverage is required iff the traded underlying is SPX. Derived
-        from the candidate/instrument, never supplied manually (review blocker 3)."""
+        """§11: SPX feed coverage required iff the traded underlying is SPX (derived)."""
         return self.candidate.underlying is Underlying.SPX
 
     @property
-    def derived_zero_dte_after_2pm_ct(self) -> bool:
-        """The only correct value of the late-day 0-DTE flag, computed from inputs."""
-        return self.candidate.dte == 0 and self.ct_minutes_since_midnight >= self._AFTER_2PM_CT_MIN
+    def is_zero_dte_after_2pm_ct(self) -> bool:
+        """Late-day 0-DTE freshness tightening — fully DERIVED (review v1.2 blocker 6),
+        using the metadata-derived DTE (NOT candidate.dte) and the CT clock. Omission is
+        impossible because there is no input field; the value is always computed here."""
+        return self.derived_dte == 0 and self.ct_minutes_since_midnight >= self._AFTER_2PM_CT_MIN
+
+    @property
+    def dte_matches_claim(self) -> bool:
+        """True if the LLM-claimed candidate.dte agrees with the derived DTE (blocker 4).
+        A mismatch is surfaced by the Gateway as a DTE_MISMATCH reason code (a clean
+        rejection), not a construction crash — so the audit trail records it."""
+        return self.candidate.dte == self.derived_dte
 
     @model_validator(mode="after")
-    def _cross_validate_derived_flags(self) -> "GatewayRequest":
-        # is_zero_dte_after_2pm_ct must match the derived value (blocker 8). This keeps a
-        # caller from disabling the late-day freshness tightening by passing a stale flag.
-        if self.is_zero_dte_after_2pm_ct != self.derived_zero_dte_after_2pm_ct:
-            raise ValueError(
-                "is_zero_dte_after_2pm_ct must equal (dte==0 and ct>=14:00 CT); "
-                f"derived={self.derived_zero_dte_after_2pm_ct}, "
-                f"got={self.is_zero_dte_after_2pm_ct}"
-            )
-        # The instrument object and the candidate must agree on the underlying.
+    def _cross_validate(self) -> "GatewayRequest":
+        # instrument <-> candidate underlying must agree (fail-closed at construction:
+        # a request whose instrument and candidate name different underlyings is malformed).
         if self.instrument.underlying is not self.candidate.underlying:
             raise ValueError(
                 "instrument.underlying must match candidate.underlying "

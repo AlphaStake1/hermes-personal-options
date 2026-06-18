@@ -74,16 +74,19 @@ class ExecutionGateway:
         # --- run every gate (deterministic order; collect-all) ---------------
         # §1A account mode / minimum equity (may emit two distinct codes)
         add_all(gates.gate_account_mode(request.account))
-        # §2 instrument whitelist + SPX Phase 2 gate
+        # §2 instrument permission via governance policy (SPX Phase 2 lives here now)
         add(
             gates.gate_instrument_permitted(
                 request.instrument,
                 request.candidate,
-                spx_phase_2_enabled=request.spx_phase_2_enabled,
+                request.underlying_policy,
+                as_of,
             )
         )
-        # §2A contract metadata
-        add(gates.gate_contract_metadata(request.contract, request.candidate, as_of))
+        # §2A both-leg contract metadata + candidate-spread match (may emit two codes)
+        add_all(gates.gate_contract_metadata(request.spread_contract, request.candidate, as_of))
+        # §3 candidate.dte claim must match metadata-derived DTE
+        add(gates.gate_dte_match(dte_matches_claim=request.dte_matches_claim))
         # §3 short-strike delta band
         add(gates.gate_delta_band(request.candidate))
         # §3 strategy must be LIVE
@@ -133,14 +136,18 @@ class ExecutionGateway:
     def _approve(self, request: GatewayRequest, as_of: datetime) -> GatewayDecision:
         """All gates passed; mint the three tokens into a ValidatedTradeIntent.
 
-        Token minting is itself guarded: if a mint raises despite the gate passing
-        (a logical contradiction), we fail closed and reject with the matching code
-        rather than letting an exception escape. We catch BOTH ValueError and pydantic
-        ValidationError (review blocker 4) — model_validator failures surface as
-        ValidationError, not ValueError, so catching only ValueError would let a real
-        contradiction crash the decision.
+        Because every gate has ALREADY passed by the time we get here, a token-mint
+        failure is by definition a logic contradiction (the gate said the heat/feed/strategy
+        was fine, but the corresponding token would not mint). Per review v1.2 blocker 5,
+        ANY such failure returns the dedicated INTERNAL_CONTRADICTION code — NOT the ordinary
+        gate code (HEAT_LIMIT_EXCEEDED / SECONDARY_FEED_NOT_CERTIFIED / STRATEGY_NOT_LIVE),
+        which would misleadingly imply the gate caught it.
+
+        We catch BOTH ValueError and pydantic ValidationError — model_validator failures
+        surface as ValidationError, so catching only ValueError would let a contradiction
+        crash the decision out of validate().
         """
-        codes: list[ReasonCode] = []
+        contradiction = False
 
         approved_heat = None
         certified_feed = None
@@ -149,22 +156,22 @@ class ExecutionGateway:
         try:
             approved_heat = request.heat.approve()
         except (ValueError, ValidationError):
-            codes.append(ReasonCode.HEAT_LIMIT_EXCEEDED)
+            contradiction = True
 
         try:
             certified_feed = request.feed_certification.to_live_token(
                 as_of, require_spx=request.require_spx_feed_coverage
             )
         except (ValueError, ValidationError):
-            codes.append(ReasonCode.SECONDARY_FEED_NOT_CERTIFIED)
+            contradiction = True
 
         try:
             live_strategy = request.strategy_stage.to_live_token()
         except (ValueError, ValidationError):
-            codes.append(ReasonCode.STRATEGY_NOT_LIVE_APPROVED)
+            contradiction = True
 
         # Assembling the validated intent can itself raise (defense-in-depth validators).
-        if not codes and None not in (approved_heat, certified_feed, live_strategy):
+        if not contradiction and None not in (approved_heat, certified_feed, live_strategy):
             try:
                 validated = ValidatedTradeIntent(
                     candidate=request.candidate,
@@ -174,14 +181,12 @@ class ExecutionGateway:
                 )
                 return GatewayDecision(approved=validated, rejection=None, reason_codes=())
             except (ValueError, ValidationError):
-                codes.append(ReasonCode.INTERNAL_CONTRADICTION)
+                contradiction = True
 
         # Reaching here means a gate passed but a token/assembly failed: a true internal
-        # contradiction. Use the dedicated code (review blocker 5) — never HUMAN_REARM_REQUIRED,
-        # which has specific §6 semantics and would be misleading in the audit trail.
-        if not codes:
-            codes.append(ReasonCode.INTERNAL_CONTRADICTION)
-        return self._reject(request, codes)
+        # contradiction. ALWAYS the dedicated code (review v1.2 blocker 5) — never the
+        # ordinary gate code and never HUMAN_REARM_REQUIRED.
+        return self._reject(request, [ReasonCode.INTERNAL_CONTRADICTION])
 
     def _reject(
         self, request: GatewayRequest, codes: list[ReasonCode]
