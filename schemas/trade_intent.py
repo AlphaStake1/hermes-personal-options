@@ -43,6 +43,17 @@ class SpreadLeg(MoneyModel):
     delta: Decimal  # signed; puts negative, calls positive
     contracts: int = Field(gt=0)
 
+    @model_validator(mode="after")
+    def _delta_sign_matches_option_type(self) -> "SpreadLeg":
+        # Review v1.2 blocker 2: option delta sign must be consistent with option type.
+        # PUT deltas are <= 0; CALL deltas are >= 0. Applies to BOTH short and long legs.
+        # (0 is permitted at the boundary — a far-OTM leg can round to 0 delta.)
+        if self.option_type is OptionType.PUT and self.delta > 0:
+            raise ValueError(f"PUT leg delta must be <= 0, got {self.delta}")
+        if self.option_type is OptionType.CALL and self.delta < 0:
+            raise ValueError(f"CALL leg delta must be >= 0, got {self.delta}")
+        return self
+
 
 class CandidateTradeIntent(MoneyModel):
     """LLM/orchestrator proposal. No order_type, no approval tokens — cannot be routed.
@@ -85,6 +96,25 @@ class CandidateTradeIntent(MoneyModel):
         # Same option type on both legs (vertical spread).
         if self.short_leg.option_type is not self.long_leg.option_type:
             raise ValueError("both legs must be the same option_type (vertical spread)")
+        # Equal contract counts on both legs — an unbalanced "spread" is really a naked
+        # residual (e.g. short 2 / long 1 leaves one short leg unprotected). Reject it so
+        # no undefined-risk residual can be constructed (review blocker 1).
+        if self.short_leg.contracts != self.long_leg.contracts:
+            raise ValueError(
+                "short_leg.contracts must equal long_leg.contracts "
+                "(unbalanced legs leave undefined-risk residual)"
+            )
+        # Direction must agree with option type (review blocker 2): a put credit spread is
+        # built from PUTs, a call credit spread from CALLs. A PUT_CREDIT made of CALLs is
+        # an incoherent intent and must not be constructible.
+        expected_option_type = (
+            OptionType.PUT if self.direction is SpreadDirection.PUT_CREDIT else OptionType.CALL
+        )
+        if self.short_leg.option_type is not expected_option_type:
+            raise ValueError(
+                f"{self.direction} requires {expected_option_type} legs, "
+                f"got {self.short_leg.option_type}"
+            )
         # Defined risk: credit cannot exceed width (otherwise max_loss is negative/nonsense).
         if self.net_credit >= self.spread_width:
             raise ValueError("net_credit must be less than spread_width (defined risk)")

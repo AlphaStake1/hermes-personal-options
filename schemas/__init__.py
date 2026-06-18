@@ -1,12 +1,13 @@
 """Hermes Personal Account — Pydantic v2 schema pack."""
 
 from .account_state import AccountState
+from .allowed_underlying_policy import AllowedUnderlyingPolicy
 from .approval_policy import ApprovalPolicy
 from .audit_artifact import AuditArtifact
 from .base import HermesModel, MoneyModel
 from .broker_data_snapshot import BrokerDataSnapshot
 from .concentration_limits import ConcentrationSnapshot
-from .contract_metadata import ContractMetadata
+from .contract_metadata import ContractMetadata, SpreadContractMetadata
 from .daily_rationale import DailyRationale
 from .drawdown_state import DrawdownHaltState, required_rearm_mode
 from .enums import (
@@ -40,7 +41,8 @@ __all__ = [
     "AccountState", "PortfolioHeatCheck", "ApprovedPortfolioHeat", "DrawdownHaltState",
     "required_rearm_mode",
     # tranche-1 safety-state
-    "Instrument", "ContractMetadata", "StrategyStageState", "LiveStrategyToken",
+    "Instrument", "ContractMetadata", "SpreadContractMetadata", "AllowedUnderlyingPolicy",
+    "StrategyStageState", "LiveStrategyToken",
     "stage_at_least", "StrategyGate", "StrategyPromotionRequirements",
     "SecondaryFeedCertification", "CertifiedFeedToken", "FeedCoverageStatus",
     "FeedLatencyCheck", "BrokerDataSnapshot", "PriceReconciliationCheck", "LiquidityGate",

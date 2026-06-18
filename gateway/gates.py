@@ -21,9 +21,10 @@ from __future__ import annotations
 from datetime import datetime
 
 from schemas.account_state import AccountState
+from schemas.allowed_underlying_policy import AllowedUnderlyingPolicy
 from schemas.broker_data_snapshot import BrokerDataSnapshot
 from schemas.concentration_limits import ConcentrationSnapshot
-from schemas.contract_metadata import ContractMetadata
+from schemas.contract_metadata import SpreadContractMetadata
 from schemas.drawdown_state import DrawdownHaltState
 from schemas.enums import ReasonCode
 from schemas.event_blackout import EventBlackoutCalendar
@@ -61,37 +62,53 @@ def gate_account_mode(account: AccountState) -> list[ReasonCode]:
 # --- §2 instrument whitelist ------------------------------------------------
 
 def gate_instrument_permitted(
-    instrument: Instrument, candidate: CandidateTradeIntent
+    instrument: Instrument,
+    candidate: CandidateTradeIntent,
+    policy: AllowedUnderlyingPolicy,
+    as_of: datetime,
 ) -> ReasonCode | None:
-    """§2: underlying must be on the permitted whitelist AND match the candidate.
+    """§2: underlying must be permitted by the governance policy AND match the candidate.
 
-    Existence as an `Underlying` already implies the enum whitelist; this also guards a
-    mismatch between the instrument object and the candidate's underlying, and blocks any
-    underlying not yet permitted (e.g. SPX before Phase 2 enablement is a separate gate;
-    here we enforce the global permitted set).
+    The SPX Phase-2 decision now lives in the deterministic `AllowedUnderlyingPolicy`
+    governance object (review v1.2 blocker 7), not a bare bool. An inactive/expired policy
+    fails closed. Mismatch between the instrument and the candidate also rejects.
     """
-    if not instrument.is_permitted:
-        return ReasonCode.CONTRACT_METADATA_INVALID
     if instrument.underlying is not candidate.underlying:
-        return ReasonCode.CONTRACT_METADATA_INVALID
-    return None
+        return ReasonCode.INSTRUMENT_NOT_PERMITTED
+    return policy.permission_reason(candidate.underlying, as_of)
 
 
 # --- §2A contract metadata gate ---------------------------------------------
 
 def gate_contract_metadata(
-    contract: ContractMetadata, candidate: CandidateTradeIntent, as_of: datetime
-) -> ReasonCode | None:
-    """§2A: European + cash-settled, full metadata, not past last trading time, and the
-    contract's underlying matches the candidate's."""
-    reason = contract.rejection_reason
-    if reason is not None:
-        return reason
-    if not contract.is_tradable_as_of(as_of):
-        return ReasonCode.CONTRACT_METADATA_INVALID
-    if contract.underlying is not candidate.underlying:
-        return ReasonCode.CONTRACT_METADATA_INVALID
-    return None
+    spread_contract: SpreadContractMetadata,
+    candidate: CandidateTradeIntent,
+    as_of: datetime,
+) -> list[ReasonCode]:
+    """§2A: both legs European + cash-settled, full metadata, not past last trading time,
+    AND the two contracts actually describe the candidate spread (review v1.2 blocker 3).
+
+    Returns a list because a contract can be both non-mandate-compliant and mismatched.
+    """
+    codes: list[ReasonCode] = []
+    mandate = spread_contract.rejection_reason          # CONTRACT_METADATA_INVALID or None
+    if mandate is not None:
+        codes.append(mandate)
+    if not spread_contract.is_tradable_as_of(as_of):
+        if ReasonCode.CONTRACT_METADATA_INVALID not in codes:
+            codes.append(ReasonCode.CONTRACT_METADATA_INVALID)
+    mismatch = spread_contract.matches_candidate_reason(candidate)  # CONTRACT_SPREAD_MISMATCH or None
+    if mismatch is not None:
+        codes.append(mismatch)
+    return codes
+
+
+# --- §3 DTE claim cross-validation (blocker 4) ------------------------------
+
+def gate_dte_match(*, dte_matches_claim: bool) -> ReasonCode | None:
+    """§3: candidate.dte (an LLM claim) must equal the metadata-derived DTE. The Gateway
+    uses the DERIVED dte for all risk logic; this gate rejects a disagreeing claim."""
+    return None if dte_matches_claim else ReasonCode.DTE_MISMATCH
 
 
 # --- §3 short-strike delta band ---------------------------------------------

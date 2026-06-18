@@ -40,6 +40,13 @@ def _age_ms(ts: datetime, as_of: datetime) -> int:
     return age
 
 
+def _is_future(ts: datetime, as_of: datetime) -> bool:
+    """True if `ts` is later than `as_of` (a corrupt/future data timestamp)."""
+    if ts.tzinfo is None or as_of.tzinfo is None:
+        raise ValueError("timestamps must be timezone-aware (UTC)")
+    return ts > as_of
+
+
 class BrokerDataSnapshot(HermesModel):
     """Timestamps for the data feeding a trade decision. Freshness is evaluated against
     an explicit `as_of` (UTC-aware) supplied by the caller."""
@@ -55,7 +62,25 @@ class BrokerDataSnapshot(HermesModel):
     def freshness_reason(
         self, as_of: datetime, *, zero_dte_after_2pm_ct: bool = False
     ) -> ReasonCode | None:
-        """Return the first freshness violation as a ReasonCode, or None if all fresh."""
+        """Return the first freshness violation as a ReasonCode, or None if all fresh.
+
+        Fail-closed on FUTURE/corrupt timestamps (review v1.2 blocker 1): a data timestamp
+        later than `as_of` is impossible and must never crash validation — it yields
+        DATA_TIMESTAMP_INVALID so the Gateway records a clean rejection instead of raising
+        a ValueError out of `validate()`. Future timestamps are checked BEFORE age so a
+        corrupt clock can't masquerade as fresh.
+        """
+        # 1) Reject any future/corrupt timestamp first (any feed) — fail closed.
+        for ts in (
+            self.option_quote_ts,
+            self.underlying_price_ts,
+            self.vix_ts,
+            self.iv_rank_ts,
+        ):
+            if _is_future(ts, as_of):
+                return ReasonCode.DATA_TIMESTAMP_INVALID
+
+        # 2) Normal staleness checks (now guaranteed non-future, so _age_ms won't raise).
         quote_limit = (
             MAX_QUOTE_AGE_MS_0DTE_AFTER_2PM_CT
             if zero_dte_after_2pm_ct

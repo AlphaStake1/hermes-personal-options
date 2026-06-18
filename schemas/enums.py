@@ -123,6 +123,11 @@ class ReasonCode(StrEnum):
     SECONDARY_FEED_NOT_CERTIFIED = "SECONDARY_FEED_NOT_CERTIFIED"
     EXECUTION_QUALITY_SUSPENDED = "EXECUTION_QUALITY_SUSPENDED"
     STRATEGY_NOT_LIVE_APPROVED = "STRATEGY_NOT_LIVE_APPROVED"
+    INSTRUMENT_NOT_PERMITTED = "INSTRUMENT_NOT_PERMITTED"       # §2 underlying not allowed (e.g. SPX before Phase 2)
+    INTERNAL_CONTRADICTION = "INTERNAL_CONTRADICTION"          # gate passed but token mint failed — fail closed
+    DATA_TIMESTAMP_INVALID = "DATA_TIMESTAMP_INVALID"         # §10 future/corrupt data timestamp — fail closed
+    DTE_MISMATCH = "DTE_MISMATCH"                             # §3 candidate.dte disagrees with metadata-derived DTE
+    CONTRACT_SPREAD_MISMATCH = "CONTRACT_SPREAD_MISMATCH"     # §2A contract legs don't match the candidate spread
 
 
 # --- Halt actions ------------------------------------------------------------

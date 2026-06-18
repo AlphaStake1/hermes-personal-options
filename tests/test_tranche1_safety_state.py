@@ -595,11 +595,13 @@ def test_liquidity_equal_bid_ask_allowed_construction():
     assert g.width_usd == Decimal("0")
 
 
-# Patch 2: BrokerDataSnapshot future timestamp
-def test_future_timestamp_rejected():
+# Patch 2: BrokerDataSnapshot future timestamp — v1.2 fails CLOSED (no raise).
+def test_future_timestamp_fails_closed():
+    from schemas.enums import ReasonCode
     s = _snap(option_quote_ts=NOW + timedelta(milliseconds=100))  # later than as_of
-    with pytest.raises(ValueError):
-        s.freshness_reason(NOW)
+    # v1.2 blocker 1: a future/corrupt timestamp must NOT raise out of freshness_reason;
+    # it returns DATA_TIMESTAMP_INVALID so the Gateway records a clean rejection.
+    assert s.freshness_reason(NOW) is ReasonCode.DATA_TIMESTAMP_INVALID
 
 
 # Patch 4: ExecutionQuality rearm token
