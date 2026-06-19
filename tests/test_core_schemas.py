@@ -23,7 +23,6 @@ from schemas import (
     required_rearm_mode,
 )
 
-
 # --- base posture ------------------------------------------------------------
 
 def test_extra_fields_forbidden():

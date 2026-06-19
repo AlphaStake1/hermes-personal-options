@@ -6,7 +6,7 @@ recorded as passed.
 
 from __future__ import annotations
 
-from pydantic import AwareDatetime, Field, model_validator
+from pydantic import AwareDatetime
 
 from .base import HermesModel
 from .enums import PromotionDrill

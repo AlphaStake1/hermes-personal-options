@@ -16,7 +16,7 @@ A defensively engineered, single-operator options trading platform. **Bounded op
 Pydantic v2, maximum-strict + frozen. Each module encodes a Constitution control.
 
 - `schemas/` — **complete schema pack** (core-5 + Tranche 1 safety-state + Tranche 2 trade/audit). 58 models, all preserving `additionalProperties: false`.
-- `tests/` — rejection-first: every banned behavior has a test proving the illegal payload raises `ValidationError`. **131 tests passing.**
+- `tests/` — rejection-first: every banned behavior has a test proving the illegal payload raises `ValidationError`. **197 tests passing.**
 
 Key structural guarantees (capability-token / distinct-type pattern):
 
@@ -28,4 +28,18 @@ Key structural guarantees (capability-token / distinct-type pattern):
 
 ```bash
 pip install -r requirements.txt
-pyth
+python -m pytest
+ruff check .
+pyright
+```
+
+In this WSL checkout, the existing Windows venv is invoked as:
+
+```bash
+.venv/Scripts/python.exe -m pytest
+.venv/Scripts/python.exe -m ruff check .
+.venv/Scripts/python.exe -m pyright
+```
+
+See [`docs/RUNBOOK_LOCAL.md`](docs/RUNBOOK_LOCAL.md) for the local workflow and
+[`docs/BUILDOUT_ROADMAP.md`](docs/BUILDOUT_ROADMAP.md) for phase scope.

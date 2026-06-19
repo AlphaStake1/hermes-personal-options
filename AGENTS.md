@@ -106,11 +106,13 @@ review, and Opus/Max only when the cost is justified by high blast radius.
 ## Useful Commands
 
 ```bash
-python -m pytest
-python -m pytest tests/test_order_ticket_routing_v1.py
+.venv/Scripts/python.exe -m pytest
+.venv/Scripts/python.exe -m pytest tests/test_order_ticket_routing_v1.py
+.venv/Scripts/python.exe -m ruff check .
+.venv/Scripts/python.exe -m pyright
 git status --short --branch
 git diff --stat
 ```
 
-When lint/type tooling is added in Phase 1, update this section with the exact
-Ruff and Pyright commands.
+On non-WSL or fresh Unix environments, use `python -m ...` from an activated
+Python 3.13 virtual environment.
