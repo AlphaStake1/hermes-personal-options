@@ -191,6 +191,30 @@ class ExecutionStatus(StrEnum):
     WORKING = "WORKING"
 
 
+# --- Broker submission (Phase 2) ---------------------------------------------
+
+class SubmitMode(StrEnum):
+    """Required submit mode for BrokerSubmitIntent. No dry_run=True boolean.
+
+    LIVE: real broker submission path (credentials held only by the Gateway).
+    PAPER: simulated submission path; no real order is placed.
+    """
+    LIVE = "LIVE"
+    PAPER = "PAPER"
+
+
+class OrderLifecycleState(StrEnum):
+    """State of a broker order from submission through completion."""
+    PENDING_SUBMIT = "PENDING_SUBMIT"
+    SUBMITTED = "SUBMITTED"
+    WORKING = "WORKING"
+    PARTIAL_FILL = "PARTIAL_FILL"
+    FILLED = "FILLED"
+    CANCELLED = "CANCELLED"
+    REJECTED = "REJECTED"
+    EXPIRED = "EXPIRED"
+
+
 # --- Human-required events (Constitution §6, §14) ----------------------------
 
 class HumanRequiredKind(StrEnum):

@@ -11,6 +11,8 @@ order type. MARKET can only be resolved from deterministic policy state.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from pydantic import model_validator
 
 from schemas import (
@@ -105,6 +107,8 @@ def decide_order_route(
 def mint_order_ticket(
     validated_intent: ValidatedTradeIntent,
     routing_state: OrderRoutingState,
+    *,
+    created_at: datetime | None = None,
 ) -> OrderTicket:
     """Mint an OrderTicket only from a ValidatedTradeIntent and an approved route."""
 
@@ -119,6 +123,7 @@ def mint_order_ticket(
 
     return OrderTicket(
         validated_intent=validated_intent,
+        created_at=created_at if created_at is not None else datetime.now(tz=timezone.utc),
         order_type=decision.order_type,
         policy=routing_state.order_type_policy,
         route_decision=decision,
