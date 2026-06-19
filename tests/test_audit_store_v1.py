@@ -62,7 +62,6 @@ from storage import (
     RecordType,
     SqliteAuditStore,
     StoredEvent,
-    UnrehydratableRecordError,
     UnverifiedProvenanceError,
     rehydrate,
 )
@@ -315,8 +314,8 @@ def test_unknown_object_cannot_be_persisted(store: SqliteAuditStore):
         store.append(_candidate(), created_at=NOW, recorded_at=NOW)  # type: ignore[arg-type]
 
 
-def test_phase5_record_type_is_unrehydratable():
-    """A reserved Phase-5 record type fails closed rather than half-building an object."""
+def test_position_snapshot_free_rehydrate_requires_store_provenance():
+    """A fabricated Phase-5 protected record fails closed without store provenance."""
     payload = "{}"
     event = StoredEvent(
         seq=1,
@@ -327,7 +326,7 @@ def test_phase5_record_type_is_unrehydratable():
         payload_json=payload,
         payload_sha256=payload_sha256(payload),
     )
-    with pytest.raises(UnrehydratableRecordError):
+    with pytest.raises(UnverifiedProvenanceError):
         rehydrate(event)
 
 

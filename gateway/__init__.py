@@ -30,6 +30,11 @@ from .broker_submission import (
 )
 from .gateway import ExecutionGateway, GatewayDecision
 from .order_routing import OrderRoutingState, decide_order_route, mint_order_ticket
+from .reconciliation import (
+    mint_position_snapshot_from_broker_report,
+    mint_position_snapshot_from_execution_ledger,
+    reconcile_positions,
+)
 from .request import GatewayRequest
 
 __all__ = [
@@ -43,4 +48,8 @@ __all__ = [
     "mint_broker_submit_intent",
     "mint_execution_report",
     "TICKET_MAX_AGE_SECONDS",
+    # Phase 5 — position reconciliation
+    "mint_position_snapshot_from_broker_report",
+    "mint_position_snapshot_from_execution_ledger",
+    "reconcile_positions",
 ]

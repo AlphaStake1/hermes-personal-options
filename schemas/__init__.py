@@ -51,9 +51,21 @@ from .liquidity_gate import ExecutionQualityRearmToken, ExecutionQualityState, L
 from .order_ticket import OrderLeg, OrderLegRole, OrderRouteDecision, OrderTicket, RouteMode
 from .order_type_policy import OrderTypePolicy
 from .portfolio_heat import ApprovedPortfolioHeat, PortfolioHeatCheck
+from .position_state import (
+    BrokerPositionReport,
+    ExecutionPositionLedger,
+    PositionLeg,
+    PositionSnapshot,
+    PositionSnapshotSource,
+)
 from .price_reconciliation import PriceReconciliationCheck
 from .promotion_drill import PromotionDrillResult
 from .protection_state import MultiLegPlan, ProtectionState
+from .reconciliation_state import (
+    ReconciliationPermission,
+    ReconciliationSnapshot,
+    ReconciliationStatus,
+)
 from .risk_payload import RiskPayload
 from .secondary_feed_certification import (
     CertifiedFeedToken,
@@ -87,6 +99,10 @@ __all__ = [
     # Phase 2 — broker submission
     "BrokerOrderId", "BrokerSubmitIntent", "BrokerOrderEnvelope", "RejectedSubmission",
     "ExecutionReport",
+    # Phase 5 — position reconciliation
+    "BrokerPositionReport", "ExecutionPositionLedger", "PositionLeg", "PositionSnapshot",
+    "PositionSnapshotSource", "ReconciliationPermission", "ReconciliationSnapshot",
+    "ReconciliationStatus",
     # enums
     "AccountType", "CertificationStatus", "DrawdownTier", "EmergencyState",
     "ExecutionStatus", "ExerciseStyle", "FeedProvider", "HaltAction", "HumanRequiredKind",

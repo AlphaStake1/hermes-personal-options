@@ -128,6 +128,7 @@ class ReasonCode(StrEnum):
     DATA_TIMESTAMP_INVALID = "DATA_TIMESTAMP_INVALID"         # §10 future/corrupt data timestamp — fail closed
     DTE_MISMATCH = "DTE_MISMATCH"                             # §3 candidate.dte disagrees with metadata-derived DTE
     CONTRACT_SPREAD_MISMATCH = "CONTRACT_SPREAD_MISMATCH"     # §2A contract legs don't match the candidate spread
+    RECONCILIATION_MISMATCH = "RECONCILIATION_MISMATCH"       # Phase 5 expected vs broker position mismatch
 
 
 # --- Halt actions ------------------------------------------------------------
