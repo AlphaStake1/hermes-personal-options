@@ -26,6 +26,7 @@ from schemas.broker_data_snapshot import BrokerDataSnapshot
 from schemas.concentration_limits import ConcentrationSnapshot
 from schemas.contract_metadata import SpreadContractMetadata
 from schemas.drawdown_state import DrawdownHaltState
+from schemas.entry_window import ENTRY_WINDOW_CLOSE_CT_MIN, ENTRY_WINDOW_OPEN_CT_MIN
 from schemas.enums import ReasonCode
 from schemas.event_blackout import EventBlackoutCalendar
 from schemas.instrument import Instrument
@@ -37,9 +38,9 @@ from schemas.secondary_feed_certification import SecondaryFeedCertification
 from schemas.strategy_stage import StrategyStageState
 from schemas.trade_intent import CandidateTradeIntent
 
-# §9 entry window in US/Central, expressed as minutes-since-midnight.
-ENTRY_WINDOW_OPEN_CT_MIN = 9 * 60 + 45      # 09:45 CT -> 585
-ENTRY_WINDOW_CLOSE_CT_MIN = 13 * 60          # 13:00 CT -> 780
+# §9 entry-window bounds are defined once in schemas.entry_window and imported above so
+# the strategy layer and the Gateway share the same source of truth (neither depends on
+# the other). Re-exported here for callers that import them from gateway.gates.
 
 
 # --- §1A account mode & minimum equity --------------------------------------

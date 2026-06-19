@@ -77,6 +77,7 @@ def _candidate(**over):
         long_leg=SpreadLeg(side=LegSide.LONG, option_type=OptionType.PUT,
                            strike=Decimal("490"), delta=Decimal("-0.05"), contracts=1),
         net_credit=Decimal("0.50"), multiplier=100, dte=2,
+        rationale_id="rationale-test",
     )
     base.update(over)
     return CandidateTradeIntent(**base)

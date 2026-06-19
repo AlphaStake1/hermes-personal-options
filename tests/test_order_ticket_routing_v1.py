@@ -63,6 +63,7 @@ def _candidate(**over):
         net_credit=Decimal("1.00"),
         multiplier=100,
         dte=2,
+        rationale_id="rationale-test",
     )
     base.update(over)
     return CandidateTradeIntent(**base)
