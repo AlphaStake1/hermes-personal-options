@@ -1,0 +1,15 @@
+{
+  "include": ["gateway", "schemas"],
+  "exclude": [
+    "**/__pycache__",
+    ".venv",
+    "archive"
+  ],
+  "pythonVersion": "3.13",
+  "typeCheckingMode": "standard",
+  "reportMissingTypeStubs": false,
+  "reportUnknownMemberType": false,
+  "reportUnknownVariableType": false,
+  "reportUnknownArgumentType": false,
+  "reportUnknownLambdaType": false
+}

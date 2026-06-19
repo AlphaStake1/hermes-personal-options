@@ -8,8 +8,6 @@ whether to build a ValidatedTradeIntent.
 
 from __future__ import annotations
 
-from pydantic import model_validator
-
 from .base import MoneyModel
 from .concentration_limits import ConcentrationSnapshot
 from .enums import ReasonCode

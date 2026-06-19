@@ -114,6 +114,8 @@ def mint_order_ticket(
     decision = decide_order_route(validated_intent, routing_state)
     if not decision.approved:
         raise ValueError(f"cannot mint OrderTicket from rejected route: {decision.reason_codes}")
+    if decision.order_type is None:
+        raise ValueError("approved route decision must carry an order_type")
 
     return OrderTicket(
         validated_intent=validated_intent,

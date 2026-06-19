@@ -8,13 +8,12 @@ from pydantic import ValidationError
 
 from schemas import (
     ApprovalPolicy,
-    ApprovedPortfolioHeat,
     AuditArtifact,
     CandidateTradeIntent,
     CertificationStatus,
-    CertifiedFeedToken,
     ConcentrationSnapshot,
     DailyRationale,
+    EmergencyState,
     ExecutionQualityState,
     ExecutionResult,
     ExecutionStatus,
@@ -26,7 +25,6 @@ from schemas import (
     IntentStatus,
     LegSide,
     LiquidityGate,
-    LiveStrategyToken,
     OptionType,
     OrderTicket,
     OrderType,
@@ -41,7 +39,6 @@ from schemas import (
     SpreadLeg,
     StrategyStage,
     Underlying,
-    EmergencyState,
 )
 
 UTC = timezone.utc

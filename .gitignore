@@ -1,6 +1,7 @@
 # --- Secrets / credentials (NEVER commit) ---
 .env
 .env.*
+!.env.example
 *.key
 *.pem
 secrets/
@@ -24,6 +25,10 @@ node_modules/
 # --- Logs / scratch ---
 *.log
 *.tmp
+.claude/settings.local.json
+.claude/agent-memory-local/
+docs/CODEX_REVIEW_REQUEST.md
+docs/CODEX_REVIEW_RESULT.md
 
 # --- Superseded duplicate version files (canonical names are the source of truth) ---
 CONSTITUTION_v1.2.md

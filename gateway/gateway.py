@@ -171,7 +171,12 @@ class ExecutionGateway:
             contradiction = True
 
         # Assembling the validated intent can itself raise (defense-in-depth validators).
-        if not contradiction and None not in (approved_heat, certified_feed, live_strategy):
+        if (
+            not contradiction
+            and approved_heat is not None
+            and certified_feed is not None
+            and live_strategy is not None
+        ):
             try:
                 validated = ValidatedTradeIntent(
                     candidate=request.candidate,

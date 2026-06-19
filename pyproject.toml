@@ -1,0 +1,47 @@
+[project]
+name = "hermes-personal-options"
+version = "0.1.0"
+description = "Deterministic safety boundary and gateway schemas for Hermes Personal Account."
+requires-python = ">=3.13"
+dependencies = [
+    "pydantic>=2.7,<3",
+    "tzdata>=2024.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.14.0",
+    "pyright>=1.1.407",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "unit: fast deterministic unit tests",
+    "integration: integration tests that combine multiple subsystems",
+    "broker: broker adapter or broker API tests; must not hit live broker services unless explicitly configured",
+    "paper: paper-trading tests and drills",
+    "slow: slower tests excluded from tight local loops unless explicitly selected",
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+extend-exclude = [
+    ".venv",
+    "archive",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "I",
+]
+ignore = [
+    "E501",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["gateway", "schemas"]
