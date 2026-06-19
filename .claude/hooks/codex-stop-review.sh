@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -u
 
+HOOK_INPUT="$(cat 2>/dev/null || true)"
+if [ -n "$HOOK_INPUT" ]; then
+  if HOOK_INPUT="$HOOK_INPUT" node -e 'const input = JSON.parse(process.env.HOOK_INPUT || "{}"); process.exit(input.stop_hook_active ? 0 : 1);' >/dev/null 2>&1; then
+    exit 0
+  fi
+fi
+
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 if [ -z "$ROOT" ]; then
   exit 0
@@ -115,7 +122,7 @@ REVIEW_EXCERPT="$(printf '%s\n' "$REVIEW_BODY" | tail -c 12000)"
 
 if [ "$REVIEW_STATUS" -eq 0 ]; then
   GATE_STATUS="completed"
-  NEXT_ACTION="Read the Codex review below, fix blocking findings, or ask the human to approve proceeding if Codex found no blockers."
+  NEXT_ACTION="Proceed only if Codex found no blockers."
 else
   GATE_STATUS="blocking: Codex returned non-zero status $REVIEW_STATUS"
   NEXT_ACTION="Treat this as a blocked review gate. Do not proceed until the human reviews docs/CODEX_REVIEW_RESULT.md or reruns the gate successfully."
@@ -138,6 +145,24 @@ $REVIEW_EXCERPT
 EOF
 )"
 
-CONTEXT="$CONTEXT" node -e 'process.stdout.write(JSON.stringify({hookSpecificOutput:{hookEventName:"Stop",additionalContext:process.env.CONTEXT}}))'
+if [ "$REVIEW_STATUS" -ne 0 ] || printf '%s\n' "$REVIEW_BODY" | grep -Eqi '^[[:space:]]*([0-9]+\.[[:space:]]*)?(#{1,6}[[:space:]]*)?(\*\*)?Blocking([[:space:]:*]|$)'; then
+  DECISION="block"
+else
+  DECISION=""
+fi
+
+DECISION="$DECISION" CONTEXT="$CONTEXT" node -e '
+const output = {
+  hookSpecificOutput: {
+    hookEventName: "Stop",
+    additionalContext: process.env.CONTEXT || "",
+  },
+};
+if (process.env.DECISION) {
+  output.decision = process.env.DECISION;
+  output.reason = process.env.CONTEXT || "";
+}
+process.stdout.write(JSON.stringify(output));
+'
 
 exit 0

@@ -10,7 +10,9 @@ Read these files before making architectural or safety-sensitive changes:
 1. `CONSTITUTION.md`
 2. `SYSTEM_ARCHITECTURE.md`
 3. `docs/BUILDOUT_ROADMAP.md`
-4. This file
+4. `docs/CODEX_PHASE_ORCHESTRATION.md`
+5. `docs/CODEX_REVIEW_PROTOCOL.md`
+6. This file
 
 Do not fork or reinterpret the Constitution in new docs. Summarize it and link
 back to it.
@@ -52,6 +54,17 @@ Use this loop for every meaningful repo change:
 6. **Review:** perform an independent boundary review before calling work done.
 
 For narrow bug fixes, collapse the loop but keep the same checks.
+
+## Codex Orchestration Role
+
+Codex must read `docs/CODEX_PHASE_ORCHESTRATION.md` before starting each
+buildout phase. By default, Codex is the orchestrator and review gate while
+Claude Code drafts phase implementation work first.
+
+Do not silently implement an entire phase in Codex when the established workflow
+expects Claude to draft and the Stop hook to request Codex review. Codex may
+implement a whole phase only when the human explicitly asks Codex to do so or
+when the human explicitly overrides the Claude-first workflow for that task.
 
 ## Parallelization Rules
 

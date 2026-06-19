@@ -10,7 +10,9 @@ pre-submission routing intent, not a broker order.
 
 from __future__ import annotations
 
-from pydantic import Field, model_validator
+from datetime import datetime, timezone
+
+from pydantic import AwareDatetime, Field, model_validator
 
 from .base import HermesModel
 from .enums import IntentStatus, LegSide, OrderType, ReasonCode, StrEnum
@@ -83,6 +85,7 @@ class OrderTicket(HermesModel):
 
     status: IntentStatus = IntentStatus.TICKETED
     validated_intent: ValidatedTradeIntent
+    created_at: AwareDatetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
     order_type: OrderType
     policy: OrderTypePolicy
     route_decision: OrderRouteDecision | None = None
@@ -107,7 +110,10 @@ class OrderTicket(HermesModel):
 
     def _validate_leg_ordering(self) -> None:
         if not self.legs:
-            return
+            raise ValueError(
+                "OrderTicket requires routed legs "
+                f"({ReasonCode.PROTECTION_HIERARCHY_VIOLATION})"
+            )
 
         roles = tuple(leg.role for leg in self.legs)
         if roles.count(OrderLegRole.LONG_PROTECTIVE) != 1:

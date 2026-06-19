@@ -23,6 +23,11 @@ deterministic code (Constitution §0.1, §17).
 
 from __future__ import annotations
 
+from .broker_submission import (
+    TICKET_MAX_AGE_SECONDS,
+    mint_broker_submit_intent,
+    mint_execution_report,
+)
 from .gateway import ExecutionGateway, GatewayDecision
 from .order_routing import OrderRoutingState, decide_order_route, mint_order_ticket
 from .request import GatewayRequest
@@ -34,4 +39,8 @@ __all__ = [
     "OrderRoutingState",
     "decide_order_route",
     "mint_order_ticket",
+    # Phase 2 — broker submission
+    "mint_broker_submit_intent",
+    "mint_execution_report",
+    "TICKET_MAX_AGE_SECONDS",
 ]

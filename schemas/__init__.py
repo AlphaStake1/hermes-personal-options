@@ -6,6 +6,12 @@ from .approval_policy import ApprovalPolicy
 from .audit_artifact import AuditArtifact
 from .base import HermesModel, MoneyModel
 from .broker_data_snapshot import BrokerDataSnapshot
+from .broker_submission import (
+    BrokerOrderEnvelope,
+    BrokerOrderId,
+    BrokerSubmitIntent,
+    RejectedSubmission,
+)
 from .concentration_limits import ConcentrationSnapshot
 from .contract_metadata import ContractMetadata, SpreadContractMetadata
 from .daily_rationale import DailyRationale
@@ -24,6 +30,7 @@ from .enums import (
     LegSide,
     MacroEvent,
     OptionType,
+    OrderLifecycleState,
     OrderType,
     PromotionDrill,
     ReArmMode,
@@ -32,9 +39,11 @@ from .enums import (
     SpreadDirection,
     StrategyName,
     StrategyStage,
+    SubmitMode,
     Underlying,
 )
 from .event_blackout import EventBlackout, EventBlackoutCalendar
+from .execution_report import ExecutionReport
 from .execution_result import ExecutionResult
 from .human_required_event import HumanRequiredEvent
 from .instrument import Instrument
@@ -75,10 +84,13 @@ __all__ = [
     "ApprovalPolicy", "OrderLeg", "OrderLegRole", "OrderRouteDecision", "OrderTicket",
     "RouteMode", "ExecutionResult", "AuditArtifact", "HumanRequiredEvent",
     "PromotionDrillResult", "DailyRationale",
+    # Phase 2 — broker submission
+    "BrokerOrderId", "BrokerSubmitIntent", "BrokerOrderEnvelope", "RejectedSubmission",
+    "ExecutionReport",
     # enums
     "AccountType", "CertificationStatus", "DrawdownTier", "EmergencyState",
     "ExecutionStatus", "ExerciseStyle", "FeedProvider", "HaltAction", "HumanRequiredKind",
-    "IntentStatus", "LegSide", "MacroEvent", "OptionType", "OrderType", "PromotionDrill",
-    "ReArmMode", "ReasonCode", "SettlementStyle", "SpreadDirection", "StrategyName",
-    "StrategyStage", "Underlying",
+    "IntentStatus", "LegSide", "MacroEvent", "OptionType", "OrderLifecycleState",
+    "OrderType", "PromotionDrill", "ReArmMode", "ReasonCode", "SettlementStyle",
+    "SpreadDirection", "StrategyName", "StrategyStage", "SubmitMode", "Underlying",
 ]

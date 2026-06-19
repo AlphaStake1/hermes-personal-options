@@ -26,6 +26,8 @@ from schemas import (
     LegSide,
     LiquidityGate,
     OptionType,
+    OrderLeg,
+    OrderLegRole,
     OrderTicket,
     OrderType,
     OrderTypePolicy,
@@ -245,21 +247,40 @@ def _validated():
     )
 
 
+def _legs_long_first():
+    candidate = _put_credit_candidate()
+    return (
+        OrderLeg(
+            role=OrderLegRole.LONG_PROTECTIVE,
+            source_leg=candidate.long_leg,
+            sequence=1,
+        ),
+        OrderLeg(
+            role=OrderLegRole.SHORT_RISK,
+            source_leg=candidate.short_leg,
+            sequence=2,
+        ),
+    )
+
+
 def test_ticket_limit_in_normal_ok():
     t = OrderTicket(validated_intent=_validated(), order_type=OrderType.LIMIT,
-                    policy=OrderTypePolicy(state=EmergencyState.NORMAL))
+                    policy=OrderTypePolicy(state=EmergencyState.NORMAL),
+                    legs=_legs_long_first())
     assert t.status is IntentStatus.TICKETED
 
 
 def test_ticket_market_in_normal_rejected():
     with pytest.raises(ValidationError):
         OrderTicket(validated_intent=_validated(), order_type=OrderType.MARKET,
-                    policy=OrderTypePolicy(state=EmergencyState.NORMAL))
+                    policy=OrderTypePolicy(state=EmergencyState.NORMAL),
+                    legs=_legs_long_first())
 
 
 def test_ticket_market_in_emergency_ok():
     t = OrderTicket(validated_intent=_validated(), order_type=OrderType.MARKET,
-                    policy=OrderTypePolicy(state=EmergencyState.FORCED_LIQUIDATION))
+                    policy=OrderTypePolicy(state=EmergencyState.FORCED_LIQUIDATION),
+                    legs=_legs_long_first())
     assert t.order_type is OrderType.MARKET
 
 
