@@ -118,6 +118,7 @@ def _candidate() -> CandidateTradeIntent:
         net_credit=Decimal("1.00"),
         multiplier=100,
         dte=2,
+        rationale_id="rationale-test",
     )
 
 

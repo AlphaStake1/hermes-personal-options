@@ -59,6 +59,11 @@ class CandidateTradeIntent(MoneyModel):
     """LLM/orchestrator proposal. No order_type, no approval tokens — cannot be routed.
 
     Status is pinned to CANDIDATE by validator so it cannot masquerade as validated.
+
+    `rationale_id` is a required, opaque provenance handle: a deterministic reference to
+    which strategy + inputs produced this candidate (roadmap Phase 7). The schema keeps it
+    "dumb" — it only enforces non-empty — so no LLM prose crosses the boundary; the
+    strategy layer owns the deterministic derivation (same inputs => same rationale_id).
     """
 
     status: IntentStatus = IntentStatus.CANDIDATE
@@ -69,6 +74,7 @@ class CandidateTradeIntent(MoneyModel):
     net_credit: Decimal = Field(gt=0)
     multiplier: int = Field(gt=0)
     dte: int = Field(ge=0)
+    rationale_id: str = Field(min_length=1)
 
     @property
     def spread_width(self) -> Decimal:

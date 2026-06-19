@@ -21,6 +21,19 @@ standing workflow is agent-to-agent:
 6. Claude either fixes findings or asks the human whether to proceed.
 7. Human approves phase advancement, merge, or escalation.
 
+At phase start, Codex initiates the agent-to-agent workflow. If the phase is
+Claude-first, Codex must create a local Claude handoff file before stopping:
+
+```text
+.claude/agent-memory-local/codex-to-claude-phase-N.md
+```
+
+The handoff file is an ignored local coordination artifact, not repository
+source truth. It should name the target branch, required reading, current start
+state, phase scope, hard safety boundaries, suggested read-only scouts,
+verification commands, and the Codex review-gate instructions. Codex should
+report the handoff path and confirm branch/status after creating it.
+
 ## Phase-Start Checklist For Codex
 
 Before starting work for a phase, Codex must:
@@ -31,8 +44,9 @@ Before starting work for a phase, Codex must:
 3. Identify whether this is a Claude draft awaiting review, a direct human
    request for Codex implementation, or a planning/orchestration request.
 4. If no Claude draft exists and the human did not explicitly ask Codex to
-   implement solo, do not build the whole phase. Instead, prepare a Claude
-   handoff or ask the human to let Claude draft first.
+   implement solo, do not build the whole phase. Instead, prepare the local
+   Claude handoff file described above or ask the human to let Claude draft
+   first.
 5. If the human explicitly asks Codex to implement solo, state that this
    overrides the default Claude-first workflow for that task.
 
