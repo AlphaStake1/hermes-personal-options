@@ -49,10 +49,13 @@ The hook script must:
    inspect uncommitted changes when present, otherwise compare the current
    feature branch against `main`.
 4. Write `docs/CODEX_REVIEW_RESULT.md`.
-5. Return JSON `hookSpecificOutput.additionalContext` so Claude receives the
-   review as non-error Stop hook feedback.
-6. Exit `0` even when Codex returns non-zero, with the failure captured in the
-   result file and feedback.
+5. Return JSON `hookSpecificOutput.additionalContext` so Claude receives every
+   review as Stop hook feedback.
+6. Add `decision: "block"` and `reason` only when Codex fails or the review
+   body contains a blocking finding.
+7. Exit `0` even when Codex returns non-zero, with the failure captured in the
+   result file and feedback. The JSON decision, not the shell exit code, controls
+   whether Claude continues.
 
 The request and result files are ignored by git because they are ephemeral
 coordination artifacts, not source truth.

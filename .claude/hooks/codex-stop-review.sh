@@ -147,12 +147,22 @@ EOF
 
 if [ "$REVIEW_STATUS" -ne 0 ] || printf '%s\n' "$REVIEW_BODY" | grep -Eqi '^[[:space:]]*([0-9]+\.[[:space:]]*)?(#{1,6}[[:space:]]*)?(\*\*)?Blocking([[:space:]:*]|$)'; then
   DECISION="block"
-  REASON="$CONTEXT"
 else
   DECISION=""
-  REASON="$CONTEXT"
 fi
 
-DECISION="$DECISION" REASON="$REASON" node -e 'const output = {reason: process.env.REASON}; if (process.env.DECISION) output.decision = process.env.DECISION; process.stdout.write(JSON.stringify(output));'
+DECISION="$DECISION" CONTEXT="$CONTEXT" node -e '
+const output = {
+  hookSpecificOutput: {
+    hookEventName: "Stop",
+    additionalContext: process.env.CONTEXT || "",
+  },
+};
+if (process.env.DECISION) {
+  output.decision = process.env.DECISION;
+  output.reason = process.env.CONTEXT || "";
+}
+process.stdout.write(JSON.stringify(output));
+'
 
 exit 0
