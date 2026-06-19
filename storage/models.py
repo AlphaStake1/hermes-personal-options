@@ -11,7 +11,7 @@ This module defines:
 Trusted rehydration boundary (roadmap Phase 4)
 ----------------------------------------------
 Restart recovery must reconstruct persisted protected types (BrokerSubmitIntent,
-ExecutionReport, ...). Those types block direct construction via a ContextVar
+ExecutionReport, PositionSnapshot, ...). Those types block direct construction via a ContextVar
 ``__init__`` guard and a forbidden ``model_construct``. Rehydration here uses
 ``model_validate_json`` — the validation path, which:
 
@@ -24,7 +24,7 @@ ExecutionReport, ...). Those types block direct construction via a ContextVar
 This path is store-only and explicit. It does NOT weaken the agent/prose/raw-dict
 boundary: the existing ``__init__`` / ``model_construct`` guards on the protected
 types are untouched, and an agent cannot mint a protected object by feeding the store
-prose — a forged payload either fails the SHA integrity check or fails the type's own
+prose — a forged payload either fails provenance/SHA checks or fails the type's own
 coherence validators.
 """
 
@@ -48,11 +48,15 @@ from schemas import (
     OrderRouteDecision,
     OrderTicket,
     OrderType,
+    PositionLeg,
+    PositionSnapshot,
+    PositionSnapshotSource,
+    ReconciliationSnapshot,
     SubmitMode,
     ValidatedTradeIntent,
 )
 from schemas.base import HermesModel
-from schemas.enums import StrEnum
+from schemas.enums import EmergencyState, StrEnum
 
 from .errors import (
     PayloadIntegrityError,
@@ -64,9 +68,9 @@ from .errors import (
 class RecordType(StrEnum):
     """Closed set of audit-store record kinds (roadmap Phase 4 'Persist:' list).
 
-    Phase-5 kinds (POSITION_SNAPSHOT, RECONCILIATION_SNAPSHOT, KILL_SWITCH_STATE) and
-    the non-model GATEWAY_DECISION are reserved here so the schema is forward-stable,
-    but they are not yet rehydratable — see ``REHYDRATION_REGISTRY``.
+    KILL_SWITCH_STATE and the non-model GATEWAY_DECISION are reserved here so the
+    schema is forward-stable, but they are not yet rehydratable — see
+    ``REHYDRATION_REGISTRY``.
     """
 
     GATEWAY_REQUEST = "GATEWAY_REQUEST"
@@ -92,6 +96,8 @@ RECORD_TYPE_BY_CLASS: dict[type[HermesModel], RecordType] = {
     OrderTicket: RecordType.ORDER_TICKET,
     BrokerSubmitIntent: RecordType.BROKER_SUBMIT_INTENT,
     ExecutionReport: RecordType.EXECUTION_REPORT,
+    PositionSnapshot: RecordType.POSITION_SNAPSHOT,
+    ReconciliationSnapshot: RecordType.RECONCILIATION_SNAPSHOT,
     HumanRequiredEvent: RecordType.HUMAN_REQUIRED_EVENT,
     AuditArtifact: RecordType.AUDIT_ARTIFACT,
 }
@@ -178,6 +184,10 @@ def derive_record_id(obj: HermesModel) -> str:
         return obj.idempotency_key
     if isinstance(obj, AuditArtifact):
         return obj.artifact_id
+    if isinstance(obj, PositionSnapshot):
+        return obj.snapshot_id
+    if isinstance(obj, ReconciliationSnapshot):
+        return obj.reconciliation_id
     if isinstance(obj, OrderTicket):
         return derive_order_ticket_hash(obj) or _content_id(obj)
     return _content_id(obj)
@@ -246,6 +256,22 @@ def _rehydrate_execution_report(data: dict[str, Any]) -> ExecutionReport:
     )
 
 
+def _rehydrate_position_snapshot(data: dict[str, Any]) -> PositionSnapshot:
+    """Reconstruct a PositionSnapshot through its sanctioned trusted constructor."""
+    legs = tuple(PositionLeg.model_validate_json(json.dumps(leg)) for leg in data["legs"])
+    return PositionSnapshot._from_gateway(
+        snapshot_id=data["snapshot_id"],
+        source=PositionSnapshotSource(data["source"]),
+        source_id=data["source_id"],
+        created_at=datetime.fromisoformat(data["created_at"]),
+        as_of=datetime.fromisoformat(data["as_of"]),
+        legs=legs,
+        execution_report_ids=tuple(data["execution_report_ids"]),
+        broker_name=data["broker_name"],
+        emergency_state=EmergencyState(data["emergency_state"]),
+    )
+
+
 # Gated protected types refuse construction via model_validate_json (their custom
 # __init__ forces strict python-mode validation of raw JSON primitives). They are
 # reconstructed only through their sanctioned trusted constructor (_from_gateway),
@@ -254,6 +280,7 @@ def _rehydrate_execution_report(data: dict[str, Any]) -> ExecutionReport:
 _GATED_REHYDRATORS = {
     RecordType.BROKER_SUBMIT_INTENT: _rehydrate_broker_submit_intent,
     RecordType.EXECUTION_REPORT: _rehydrate_execution_report,
+    RecordType.POSITION_SNAPSHOT: _rehydrate_position_snapshot,
 }
 
 

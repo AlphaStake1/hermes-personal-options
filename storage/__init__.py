@@ -8,8 +8,9 @@ Public surface:
   * ``OpenOrderRecovery`` — restart-recovery finding for an unresolved order.
   * ``rehydrate``         — free reconstruction for NON-gated records only (e.g. JSONL
                             export consumers). Gated protected types (BrokerSubmitIntent,
-                            ExecutionReport) are refused here and may be reconstructed
-                            ONLY via ``AuditStore.rehydrate`` with store-verified provenance.
+                            ExecutionReport, PositionSnapshot) are refused here and may
+                            be reconstructed ONLY via ``AuditStore.rehydrate`` with
+                            store-verified provenance.
   * storage error types.
 """
 
