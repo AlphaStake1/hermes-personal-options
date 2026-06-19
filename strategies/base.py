@@ -162,6 +162,12 @@ def compute_rationale_id(
             ctx.long.option_symbol,
             str(ctx.long.delta),
             str(ctx.contracts),
+            # Metadata-derived candidate shape: a symbol->metadata mapping defect must not
+            # let two different candidates collide on one rationale_id, so the hash covers
+            # every field build_candidate() consumes, not just the selection symbols.
+            inputs.option_type.value,
+            str(inputs.short_strike),
+            str(inputs.long_strike),
             str(inputs.net_credit),
             str(inputs.multiplier),
             str(inputs.dte),

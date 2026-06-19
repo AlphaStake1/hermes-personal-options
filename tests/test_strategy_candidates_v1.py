@@ -47,11 +47,13 @@ from schemas import (
 from strategies import (
     CATASTROPHE_GATE,
     ZERO_DTE_GATE,
+    CandidateInputs,
     CatastrophePremiumCapture,
     SelectedLeg,
     StrategyContext,
     StrategyProposal,
     ZeroDteTimeDecay,
+    compute_rationale_id,
     rank_proposals,
 )
 from strategies import base as strat_base
@@ -223,6 +225,35 @@ def test_same_inputs_same_candidate_and_rationale_id():
     b = CatastrophePremiumCapture().generate(_ctx())[0].candidate
     assert a.model_dump() == b.model_dump()
     assert a.rationale_id == b.rationale_id
+
+
+def test_rationale_id_covers_metadata_derived_candidate_shape():
+    # Regression: rationale_id must hash every field build_candidate() consumes, so a
+    # symbol->metadata mapping defect cannot yield two different candidate shapes that
+    # collide on one rationale_id. ctx/symbols/deltas/as_of are held identical; only the
+    # metadata-derived shape (option_type, strikes) varies.
+    ctx = _ctx()
+    name = StrategyName.CATASTROPHE_PREMIUM_CAPTURE
+    base = dict(
+        iv_rank_value=Decimal("85"), dte=2, multiplier=100,
+        option_type=OptionType.PUT, short_strike=Decimal("495"),
+        long_strike=Decimal("490"), net_credit=Decimal("0.30"),
+    )
+    base_id = compute_rationale_id(strategy_name=name, ctx=ctx, inputs=CandidateInputs(**base))
+    variants = {
+        "short_strike": Decimal("496"),
+        "long_strike": Decimal("489"),
+        "option_type": OptionType.CALL,
+    }
+    ids = {
+        field: compute_rationale_id(
+            strategy_name=name, ctx=ctx, inputs=CandidateInputs(**{**base, field: value})
+        )
+        for field, value in variants.items()
+    }
+    # Each varied field changes the provenance handle, and none collide with each other.
+    assert base_id not in ids.values()
+    assert len(set(ids.values()) | {base_id}) == len(variants) + 1
 
 
 def test_different_as_of_yields_different_rationale_id():
