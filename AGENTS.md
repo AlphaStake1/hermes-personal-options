@@ -61,6 +61,10 @@ Codex must read `docs/CODEX_PHASE_ORCHESTRATION.md` before starting each
 buildout phase. By default, Codex is the orchestrator and review gate while
 Claude Code drafts phase implementation work first.
 
+At phase start, when Claude-first workflow applies, Codex must create the local
+Claude handoff file required by `docs/CODEX_PHASE_ORCHESTRATION.md` before
+stopping.
+
 Do not silently implement an entire phase in Codex when the established workflow
 expects Claude to draft and the Stop hook to request Codex review. Codex may
 implement a whole phase only when the human explicitly asks Codex to do so or
