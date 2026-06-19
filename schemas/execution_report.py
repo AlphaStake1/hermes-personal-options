@@ -66,7 +66,9 @@ class ExecutionReport(MoneyModel):
         raise TypeError("ExecutionReport.model_construct is forbidden")
 
     def model_copy(self, *args: Any, **kwargs: Any) -> "ExecutionReport":
-        if kwargs.get("update") or args:
+        # Fail closed on any use of the update= API, including a falsy {} or None:
+        # the protected type must never be mutated via copy, even as a no-op.
+        if "update" in kwargs or args:
             raise TypeError("ExecutionReport.model_copy(update=...) is forbidden")
         return super().model_copy(**kwargs)
 

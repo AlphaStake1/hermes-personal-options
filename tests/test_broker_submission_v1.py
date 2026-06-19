@@ -314,6 +314,15 @@ def test_broker_submit_intent_model_copy_update_forbidden():
         intent.model_copy(update={"submitted_at": STALE})
 
 
+def test_broker_submit_intent_model_copy_empty_update_forbidden():
+    """Even a falsy update ({} or None) is rejected: the guard fails closed."""
+    intent = _mint_normal_intent()
+    with pytest.raises(TypeError, match="model_copy"):
+        intent.model_copy(update={})
+    with pytest.raises(TypeError, match="model_copy"):
+        intent.model_copy(update=None)
+
+
 # ---------------------------------------------------------------------------
 # REJECTION-FIRST: stale and future-timestamp tickets
 # ---------------------------------------------------------------------------
@@ -540,6 +549,15 @@ def test_execution_report_model_copy_update_forbidden():
     report = _mint_report()
     with pytest.raises(TypeError, match="model_copy"):
         report.model_copy(update={"lifecycle_state": OrderLifecycleState.FILLED})
+
+
+def test_execution_report_model_copy_empty_update_forbidden():
+    """Even a falsy update ({} or None) is rejected: the guard fails closed."""
+    report = _mint_report()
+    with pytest.raises(TypeError, match="model_copy"):
+        report.model_copy(update={})
+    with pytest.raises(TypeError, match="model_copy"):
+        report.model_copy(update=None)
 
 
 def test_raw_candidate_cannot_mint_execution_report():
