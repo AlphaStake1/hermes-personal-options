@@ -116,11 +116,11 @@ class PositionSnapshot(HermesModel):
 
     @property
     def has_unprotected_short(self) -> bool:
-        return bool(_unprotected_short_legs(self.legs))
+        return bool(unprotected_short_legs(self.legs))
 
     @property
     def unprotected_short_symbols(self) -> tuple[str, ...]:
-        return tuple(leg.option_symbol for leg in _unprotected_short_legs(self.legs))
+        return tuple(leg.option_symbol for leg in unprotected_short_legs(self.legs))
 
     @model_validator(mode="after")
     def _source_and_emergency_are_coherent(self) -> "PositionSnapshot":
@@ -146,19 +146,57 @@ class PositionSnapshot(HermesModel):
         return self
 
 
-def _unprotected_short_legs(legs: tuple[PositionLeg, ...]) -> tuple[PositionLeg, ...]:
+def unprotected_short_legs(legs: tuple[PositionLeg, ...]) -> tuple[PositionLeg, ...]:
+    """Short legs with at least one contract left unprotected after allocating
+    long-leg capacity.
+
+    Each long contract may protect at most one short contract — a single long is
+    never double-counted across multiple shorts. Allocation is deterministic:
+    the most-constrained short is matched first, consuming the least-flexible
+    eligible long, so the more flexible longs are preserved for the remaining
+    shorts. A short whose contract count exceeds the available protective long
+    capacity is reported unprotected (Constitution §8 protection hierarchy).
+    """
     shorts = [leg for leg in legs if leg.side is LegSide.SHORT]
     longs = [leg for leg in legs if leg.side is LegSide.LONG]
+    remaining: dict[int, int] = {idx: long.contracts for idx, long in enumerate(longs)}
     unprotected: list[PositionLeg] = []
-    for short in shorts:
-        protective_contracts = sum(
-            long.contracts
-            for long in longs
-            if _is_protective_long_for(short, long)
-        )
-        if protective_contracts < short.contracts:
+    for short in _shorts_most_constrained_first(shorts):
+        needed = short.contracts
+        for idx in _eligible_longs_least_flexible_first(short, longs):
+            if needed <= 0:
+                break
+            take = min(needed, remaining[idx])
+            needed -= take
+            remaining[idx] -= take
+        if needed > 0:
             unprotected.append(short)
     return tuple(unprotected)
+
+
+def _shorts_most_constrained_first(shorts: list[PositionLeg]) -> list[PositionLeg]:
+    # Puts: a low-strike short has the fewest protective longs beneath it, so it
+    # is the most constrained and must be matched first. Calls mirror this.
+    return sorted(
+        shorts,
+        key=lambda leg: leg.strike if leg.option_type is OptionType.PUT else -leg.strike,
+    )
+
+
+def _eligible_longs_least_flexible_first(
+    short: PositionLeg, longs: list[PositionLeg]
+) -> list[int]:
+    eligible = [
+        idx for idx, long in enumerate(longs) if _is_protective_long_for(short, long)
+    ]
+    # Consume the long closest to the short's strike first (highest-strike long
+    # for puts, lowest-strike for calls), preserving more flexible longs for the
+    # remaining shorts.
+    eligible.sort(
+        key=lambda idx: longs[idx].strike,
+        reverse=short.option_type is OptionType.PUT,
+    )
+    return eligible
 
 
 def _is_protective_long_for(short: PositionLeg, long: PositionLeg) -> bool:

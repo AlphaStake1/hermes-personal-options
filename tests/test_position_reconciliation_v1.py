@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -49,6 +50,7 @@ from schemas import (
     Underlying,
     ValidatedTradeIntent,
 )
+from schemas.position_state import unprotected_short_legs
 from storage import RecordType, SqliteAuditStore, rehydrate
 from storage.errors import UnverifiedProvenanceError
 from storage.models import _rehydrate_position_snapshot
@@ -249,9 +251,9 @@ def test_position_snapshot_copy_update_forbidden():
 def test_earlier_stage_objects_cannot_mint_position_snapshot():
     candidate = _candidate()
     with pytest.raises(TypeError, match="BrokerPositionReport"):
-        mint_position_snapshot_from_broker_report(candidate, created_at=NOW)
+        mint_position_snapshot_from_broker_report(candidate, created_at=NOW)  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="ExecutionPositionLedger"):
-        mint_position_snapshot_from_execution_ledger(candidate, (), created_at=NOW)
+        mint_position_snapshot_from_execution_ledger(candidate, (), created_at=NOW)  # type: ignore[arg-type]
 
 
 def test_execution_ledger_requires_matching_execution_reports():
@@ -269,11 +271,11 @@ def test_execution_ledger_requires_matching_execution_reports():
 
 def test_only_broker_reports_or_execution_ledgers_can_derive_position_state():
     with pytest.raises(TypeError):
-        mint_position_snapshot_from_broker_report({"legs": []}, created_at=NOW)
+        mint_position_snapshot_from_broker_report({"legs": []}, created_at=NOW)  # type: ignore[arg-type]
     with pytest.raises(TypeError):
         mint_position_snapshot_from_execution_ledger(
             _ledger(*_protected_spread_legs()),
-            (_candidate(),),
+            (_candidate(),),  # type: ignore[arg-type]
             created_at=NOW,
         )
 
@@ -368,3 +370,124 @@ def test_position_snapshot_rehydrator_revalidates_protection_invariants():
     }
     with pytest.raises(ValueError, match="requires non-NORMAL emergency_state"):
         _rehydrate_position_snapshot(data)
+
+
+def _snapshot_payload_json() -> dict:
+    return {
+        "snapshot_id": "forged",
+        "source": PositionSnapshotSource.BROKER_REPORT.value,
+        "source_id": "broker-1",
+        "created_at": NOW.isoformat(),
+        "as_of": FRESH.isoformat(),
+        "legs": [leg.model_dump(mode="json") for leg in _protected_spread_legs()],
+        "execution_report_ids": [],
+        "broker_name": "fake",
+        "emergency_state": EmergencyState.NORMAL.value,
+    }
+
+
+def test_position_snapshot_model_validate_cannot_construct():
+    with pytest.raises(TypeError, match="deterministic gateway code"):
+        PositionSnapshot.model_validate(_snapshot_payload_json())
+
+
+def test_position_snapshot_model_validate_json_cannot_construct():
+    with pytest.raises(TypeError, match="deterministic gateway code"):
+        PositionSnapshot.model_validate_json(json.dumps(_snapshot_payload_json()))
+
+
+# --- protection allocation: a long contract protects at most one short --------
+
+
+def test_one_long_cannot_protect_two_shorts():
+    legs = (
+        _position_leg(symbol="XSP260622P00495", side=LegSide.SHORT, strike="495"),
+        _position_leg(symbol="XSP260622P00493", side=LegSide.SHORT, strike="493"),
+        _position_leg(symbol="XSP260622P00490", side=LegSide.LONG, strike="490"),
+    )
+    uncovered = unprotected_short_legs(legs)
+    assert len(uncovered) == 1
+    # the lower-strike short consumes the single long; the 495 short is naked
+    assert uncovered[0].option_symbol == "XSP260622P00495"
+
+
+def test_each_short_gets_its_own_long_is_fully_protected():
+    legs = (
+        _position_leg(symbol="XSP260622P00495", side=LegSide.SHORT, strike="495"),
+        _position_leg(symbol="XSP260622P00493", side=LegSide.SHORT, strike="493"),
+        _position_leg(symbol="XSP260622P00490", side=LegSide.LONG, strike="490"),
+        _position_leg(symbol="XSP260622P00488", side=LegSide.LONG, strike="488"),
+    )
+    assert unprotected_short_legs(legs) == ()
+
+
+def test_multi_contract_long_covers_multi_contract_short():
+    legs = (
+        _position_leg(symbol="XSP260622P00495", side=LegSide.SHORT, strike="495", contracts=2),
+        _position_leg(symbol="XSP260622P00490", side=LegSide.LONG, strike="490", contracts=2),
+    )
+    assert unprotected_short_legs(legs) == ()
+
+
+def test_short_contracts_exceeding_long_capacity_are_unprotected():
+    legs = (
+        _position_leg(symbol="XSP260622P00495", side=LegSide.SHORT, strike="495", contracts=2),
+        _position_leg(symbol="XSP260622P00490", side=LegSide.LONG, strike="490", contracts=1),
+    )
+    assert len(unprotected_short_legs(legs)) == 1
+
+
+def test_one_long_two_shorts_forces_broken_spread_on_mint():
+    """The double-count bug would have minted this as NORMAL; it must be BROKEN_SPREAD."""
+    broker = mint_position_snapshot_from_broker_report(
+        _broker_report(
+            _position_leg(symbol="XSP260622P00495", side=LegSide.SHORT, strike="495"),
+            _position_leg(symbol="XSP260622P00493", side=LegSide.SHORT, strike="493"),
+            _position_leg(symbol="XSP260622P00490", side=LegSide.LONG, strike="490"),
+            report_id="broker-two-shorts",
+        ),
+        created_at=NOW,
+        snapshot_id="broker-two-shorts",
+    )
+    assert broker.has_unprotected_short
+    assert broker.emergency_state is EmergencyState.BROKEN_SPREAD
+
+
+def test_agreeing_but_dangerous_state_still_blocks_new_entries():
+    """Expected and broker agree on a naked short; reconciliation must not say MATCH."""
+    dangerous = (
+        _position_leg(symbol="XSP260622P00495", side=LegSide.SHORT, strike="495"),
+        _position_leg(symbol="XSP260622P00493", side=LegSide.SHORT, strike="493"),
+        _position_leg(symbol="XSP260622P00490", side=LegSide.LONG, strike="490"),
+    )
+    report = _execution_report()
+    expected = mint_position_snapshot_from_execution_ledger(
+        ExecutionPositionLedger(
+            ledger_id="ledger-danger",
+            as_of=FRESH,
+            legs=dangerous,
+            execution_report_ids=(report.idempotency_key,),
+        ),
+        (report,),
+        created_at=NOW,
+        snapshot_id="expected-danger",
+    )
+    broker = mint_position_snapshot_from_broker_report(
+        _broker_report(*dangerous, report_id="broker-danger"),
+        created_at=NOW,
+        snapshot_id="broker-danger",
+    )
+    assert expected.has_unprotected_short
+    assert broker.has_unprotected_short
+
+    result = reconcile_positions(
+        expected,
+        broker,
+        created_at=NOW,
+        reconciliation_id="recon-danger",
+    )
+    assert result.status is ReconciliationStatus.MISMATCH
+    assert result.blocks_new_entries
+    assert result.permission is ReconciliationPermission.MANAGED_EXIT_ONLY
+    assert result.human_required_event is not None
+    assert result.human_required_event.kind is HumanRequiredKind.BROKEN_SPREAD

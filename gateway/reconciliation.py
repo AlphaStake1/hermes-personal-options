@@ -25,6 +25,7 @@ from schemas import (
     ReconciliationSnapshot,
     ReconciliationStatus,
 )
+from schemas.position_state import unprotected_short_legs
 
 
 def mint_position_snapshot_from_broker_report(
@@ -173,29 +174,11 @@ def _aware(value: datetime, field_name: str) -> datetime:
 
 
 def _emergency_state_for_legs(legs: tuple[PositionLeg, ...]) -> EmergencyState:
-    return EmergencyState.BROKEN_SPREAD if _has_unprotected_short(legs) else EmergencyState.NORMAL
-
-
-def _has_unprotected_short(legs: tuple[PositionLeg, ...]) -> bool:
-    shorts = [leg for leg in legs if leg.side.value == "SHORT"]
-    longs = [leg for leg in legs if leg.side.value == "LONG"]
-    for short in shorts:
-        protective_contracts = sum(long.contracts for long in longs if _protects(short, long))
-        if protective_contracts < short.contracts:
-            return True
-    return False
-
-
-def _protects(short: PositionLeg, long: PositionLeg) -> bool:
-    if short.underlying is not long.underlying:
-        return False
-    if short.expiration_date != long.expiration_date:
-        return False
-    if short.option_type is not long.option_type:
-        return False
-    if short.option_type.value == "PUT":
-        return long.strike < short.strike
-    return long.strike > short.strike
+    return (
+        EmergencyState.BROKEN_SPREAD
+        if unprotected_short_legs(legs)
+        else EmergencyState.NORMAL
+    )
 
 
 def _normalized_legs(legs: tuple[PositionLeg, ...]) -> tuple[tuple[object, ...], ...]:
