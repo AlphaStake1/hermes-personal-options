@@ -2,12 +2,6 @@
 set -u
 
 HOOK_INPUT="$(cat 2>/dev/null || true)"
-if [ -n "$HOOK_INPUT" ]; then
-  if HOOK_INPUT="$HOOK_INPUT" node -e 'const input = JSON.parse(process.env.HOOK_INPUT || "{}"); process.exit(input.stop_hook_active ? 0 : 1);' >/dev/null 2>&1; then
-    exit 0
-  fi
-fi
-
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 if [ -z "$ROOT" ]; then
   exit 0
@@ -17,6 +11,11 @@ REQUEST="$ROOT/docs/CODEX_REVIEW_REQUEST.md"
 RESULT="$ROOT/docs/CODEX_REVIEW_RESULT.md"
 
 if [ ! -f "$REQUEST" ]; then
+  if [ -n "$HOOK_INPUT" ]; then
+    if HOOK_INPUT="$HOOK_INPUT" node -e 'const input = JSON.parse(process.env.HOOK_INPUT || "{}"); process.exit(input.stop_hook_active ? 0 : 1);' >/dev/null 2>&1; then
+      exit 0
+    fi
+  fi
   exit 0
 fi
 
