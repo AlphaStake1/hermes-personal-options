@@ -22,6 +22,7 @@ from .errors import (
     BrokerRejectedError,
     BrokerTimeoutError,
     LiveSubmitNotPermittedError,
+    OrderNotCancellableError,
     UnknownOrderError,
 )
 
@@ -127,6 +128,13 @@ class _FakeBrokerBase(BrokerAdapter):
 
     def cancel_order(self, order_id: BrokerOrderId) -> BrokerFill:
         current = self.get_order(order_id)  # raises UnknownOrderError if absent
+        if current.lifecycle_state not in _OPEN_STATES:
+            # Fail closed: cancelling a terminal order would let the fake emit an
+            # ambiguous result (e.g. CANCELLED with filled == requested).
+            raise OrderNotCancellableError(
+                f"cannot cancel order in terminal state {current.lifecycle_state}",
+                reason_code=ReasonCode.INTERNAL_CONTRADICTION,
+            )
         cancelled = BrokerFill(
             broker_order_id=current.broker_order_id,
             lifecycle_state=OrderLifecycleState.CANCELLED,

@@ -12,6 +12,7 @@ from .errors import (
     BrokerRejectedError,
     BrokerTimeoutError,
     LiveSubmitNotPermittedError,
+    OrderNotCancellableError,
     UnknownOrderError,
     audit_artifact_from_broker_error,
 )
@@ -36,6 +37,7 @@ __all__ = [
     "BrokerDisconnectError",
     "BrokerTimeoutError",
     "LiveSubmitNotPermittedError",
+    "OrderNotCancellableError",
     "UnknownOrderError",
     "audit_artifact_from_broker_error",
     # fakes

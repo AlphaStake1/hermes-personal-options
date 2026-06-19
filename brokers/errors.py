@@ -49,6 +49,15 @@ class UnknownOrderError(BrokerError):
     """get_order/cancel_order referenced an order id the adapter never issued."""
 
 
+class OrderNotCancellableError(BrokerError):
+    """cancel_order was called on an order that is not in an open/cancellable state.
+
+    Cancelling a terminal order (FILLED/CANCELLED/REJECTED/EXPIRED) is rejected so the
+    adapter can never produce an ambiguous result such as a CANCELLED-yet-fully-filled
+    order that would mask execution state in later reconciliation.
+    """
+
+
 def audit_artifact_from_broker_error(
     error: BrokerError,
     *,

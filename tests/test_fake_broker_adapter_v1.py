@@ -31,6 +31,7 @@ from brokers import (
     FakeRejectBroker,
     FakeSlowBroker,
     LiveSubmitNotPermittedError,
+    OrderNotCancellableError,
     UnknownOrderError,
     audit_artifact_from_broker_error,
 )
@@ -300,6 +301,27 @@ def test_cancel_order_marks_cancelled():
     cancelled = broker.cancel_order(fill.broker_order_id)
     assert cancelled.lifecycle_state is OrderLifecycleState.CANCELLED
     assert cancelled.broker_order_id == fill.broker_order_id
+
+
+def test_cancel_filled_order_is_rejected():
+    broker = FakeFillBroker(clock=NOW)
+    fill = broker.submit_order(_mint_intent())
+    assert fill.lifecycle_state is OrderLifecycleState.FILLED
+    with pytest.raises(OrderNotCancellableError):
+        broker.cancel_order(fill.broker_order_id)
+
+
+def test_cancel_already_cancelled_order_is_rejected():
+    broker = FakePartialFillBroker(clock=NOW)
+    fill = broker.submit_order(_mint_intent(contracts=2))
+    broker.cancel_order(fill.broker_order_id)  # open -> CANCELLED
+    with pytest.raises(OrderNotCancellableError):
+        broker.cancel_order(fill.broker_order_id)  # already terminal
+
+
+# REJECTED / EXPIRED are not reachable as STORED fills (a reject raises inside
+# _simulate and is never recorded), so FILLED and already-CANCELLED exercise the
+# terminal-state guard; the guard itself rejects every non-open lifecycle state.
 
 
 def test_open_orders_excludes_completed():
