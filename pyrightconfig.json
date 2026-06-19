@@ -1,5 +1,5 @@
 {
-  "include": ["brokers", "gateway", "schemas"],
+  "include": ["brokers", "data", "gateway", "schemas"],
   "exclude": [
     "**/__pycache__",
     ".venv",
