@@ -22,6 +22,12 @@ __pycache__/
 # --- Node ---
 node_modules/
 
+# --- Audit store artifacts (local SQLite db + JSONL exports are runtime data) ---
+*.db
+*.sqlite
+*.sqlite3
+*.jsonl
+
 # --- Logs / scratch ---
 *.log
 *.tmp
