@@ -135,6 +135,10 @@ class ReasonCode(StrEnum):
     DTE_MISMATCH = "DTE_MISMATCH"                             # §3 candidate.dte disagrees with metadata-derived DTE
     CONTRACT_SPREAD_MISMATCH = "CONTRACT_SPREAD_MISMATCH"     # §2A contract legs don't match the candidate spread
     RECONCILIATION_MISMATCH = "RECONCILIATION_MISMATCH"       # Phase 5 expected vs broker position mismatch
+    OPERATOR_HALT_COMMAND = "OPERATOR_HALT_COMMAND"           # Phase 10 §14 human-issued halt-new-entries
+    OPERATOR_RESUME_COMMAND = "OPERATOR_RESUME_COMMAND"       # Phase 10 §14 human-issued resume-new-entries
+    OPERATOR_CANCEL_COMMAND = "OPERATOR_CANCEL_COMMAND"       # Phase 10 §14 human-issued cancel-open-orders
+    OPERATOR_FLATTEN_COMMAND = "OPERATOR_FLATTEN_COMMAND"     # Phase 10 §14 human-issued flatten-paper-only
 
 
 # --- Halt actions ------------------------------------------------------------
