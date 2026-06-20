@@ -99,6 +99,12 @@ class AccountType(StrEnum):
     MULTI_ACCOUNT = "multi_account"         # prohibited until human approval
 
 
+class BrokerMode(StrEnum):
+    PAPER = "paper"
+    NONE = "none"
+    LIVE_READONLY = "live_readonly"
+
+
 # --- Reason codes (Constitution §16) -----------------------------------------
 
 class ReasonCode(StrEnum):
