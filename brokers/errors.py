@@ -45,6 +45,18 @@ class LiveSubmitNotPermittedError(BrokerError):
     """A fake adapter was asked to service SubmitMode.LIVE. Fail closed."""
 
 
+class PaperSubmissionDisabledError(BrokerError):
+    """Local paper submit was requested while paper submission is disarmed."""
+
+
+class PaperPolicyViolationError(BrokerError):
+    """Local paper submit violates deterministic Phase 9 paper policy."""
+
+
+class HumanConfirmationRequiredError(BrokerError):
+    """Local paper submit requires an explicit human confirmation token."""
+
+
 class UnknownOrderError(BrokerError):
     """get_order/cancel_order referenced an order id the adapter never issued."""
 

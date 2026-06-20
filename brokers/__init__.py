@@ -11,8 +11,11 @@ from .errors import (
     BrokerError,
     BrokerRejectedError,
     BrokerTimeoutError,
+    HumanConfirmationRequiredError,
     LiveSubmitNotPermittedError,
     OrderNotCancellableError,
+    PaperPolicyViolationError,
+    PaperSubmissionDisabledError,
     UnknownOrderError,
     audit_artifact_from_broker_error,
 )
@@ -23,6 +26,13 @@ from .fake import (
     FakePartialFillBroker,
     FakeRejectBroker,
     FakeSlowBroker,
+)
+from .paper import (
+    LocalPaperBroker,
+    PaperBrokerConfig,
+    PaperSubmitApproval,
+    assert_no_real_broker_payload,
+    paper_submit_approval_for_intent,
 )
 
 __all__ = [
@@ -37,6 +47,9 @@ __all__ = [
     "BrokerDisconnectError",
     "BrokerTimeoutError",
     "LiveSubmitNotPermittedError",
+    "PaperSubmissionDisabledError",
+    "PaperPolicyViolationError",
+    "HumanConfirmationRequiredError",
     "OrderNotCancellableError",
     "UnknownOrderError",
     "audit_artifact_from_broker_error",
@@ -47,4 +60,10 @@ __all__ = [
     "FakeDisconnectBroker",
     "FakeSlowBroker",
     "FakeDuplicateAckBroker",
+    # local paper
+    "PaperBrokerConfig",
+    "PaperSubmitApproval",
+    "LocalPaperBroker",
+    "paper_submit_approval_for_intent",
+    "assert_no_real_broker_payload",
 ]
