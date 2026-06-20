@@ -9,6 +9,62 @@ brokers so a later, separately-approved step can select one. It does not
 authorize broker selection, adapter implementation, paper submission, or any
 live behavior.
 
+## Selection Status: DEFERRED
+
+**Deferred until:** real paper-submit enablement (post Phase 9).
+
+**Rationale:** the deterministic boundary (`brokers/base.py`) is broker-neutral,
+and a working `FakeBroker` implements the full `BrokerAdapter` contract. Phase 9's
+safety-relevant work (paper-mode config defaults, rejection-first boundary, audit
+artifacts, paper submit/cancel drills) can be built and tested against the fake
+adapter with live read-only data. No real broker is load-bearing until
+`SUBMISSION_ENABLED=true` routes to a live venue sandbox.
+
+**Non-binding current lean (NOT a selection):** Interactive Brokers for
+traditional options, Deribit for crypto options. This records direction only;
+selection remains blocked by the verification gates below and the Fail-Closed
+Decision Rules. Nothing in this section authorizes opening a funded account,
+committing credentials, or enabling any submit path.
+
+### Pre-Selection Verification Gates (Must Close Before Selection)
+
+These gates list **actions to perform**, not verified findings. Any capability
+specifics embedded below are directional, drawn from **non-authoritative
+background research** (archived at
+[`docs/research/2026-06-20-broker-api-selection-research.md`](research/2026-06-20-broker-api-selection-research.md));
+treat every such specific as **UNVERIFIED** until empirically confirmed against
+an official source or a live sandbox test.
+
+Traditional options:
+
+1. **IBKR (current lean):** open and fund an IBKR Pro account → verify paper
+   account creation → run the ≥5-market-day persistence test → verify options
+   order submission via the API. *Claimed (unverified):* paper requires a funded
+   live account; paper fills are top-of-book with limited combos; nightly
+   IServer reset + possible Sunday-night GTC purge — test explicitly.
+2. **Tradier:** create a sandbox token → run the 5-market-day persistence test →
+   verify options order submission. *Claimed (unverified):* sandbox is 15-min
+   delayed with no streaming endpoint.
+3. **Schwab:** treat as **not recommended** for API paper trading until Schwab
+   officially ships a production-grade paper API. *Claimed (unverified):* no
+   API-accessible paper venue (paperMoney is GUI-only); 7-day interactive OAuth.
+4. **Alpaca:** evaluate only as a fallback. *Claimed (unverified):* strong paper
+   persistence (create/delete model) but newer options coverage — verify
+   multi-leg/index depth live.
+
+Crypto options:
+
+1. **Deribit (current lean):** create a testnet account at `test.deribit.com` →
+   run the ≥5-market-day persistence test → verify options order submission and
+   WebSocket stability. *Hard constraint to verify:* US-person live eligibility —
+   testnet is for development only; do not assume a compliant live path.
+2. **OKX:** demo via `x-simulated-trading: 1` header → persistence + order
+   lifecycle test. *Hard constraint:* not US-available.
+3. **US-compliant live path:** the only clearly-regulated US route surfaced was
+   CME BTC/ETH options on futures via an FCM/broker (e.g. IBKR) — different
+   contract specs (§1256, options-on-futures), expensive market data; verify
+   directly before relying.
+
 ## Hard Constraints For This Document
 
 - No broker is selected in this phase.
@@ -131,8 +187,13 @@ These are gating. None may be answered from memory, blogs, or third-party SDKs.
 1. For each candidate: an official statement that **multi-leg/combo orders on
    XSP/SPX** are supported via the API (not just on the desktop platform).
 2. For each candidate: an official description of a **paper order-execution**
-   path reachable via the API, including whether it **persists for ≥5 market
-   days** without forced reset.
+   path reachable via the API. **≥5-market-day persistence is an empirical-test
+   requirement, not a documentation hunt** — no broker is known to officially
+   guarantee it, so this item is closed only by *running* a 5–10 business-day
+   persistence test against the actual sandbox (including a Friday→Monday
+   resting-GTC check) and recording the observed behavior as the evidence. A
+   documented reset model (e.g. tastytrade's 24h wipe) can still *disqualify* a
+   broker from documentation alone.
 3. For each candidate: official **status / fill / cancel** endpoint semantics,
    including how partial fills and rejections are represented.
 4. For each candidate: official **market-data entitlement** requirements for
@@ -141,6 +202,27 @@ These are gating. None may be answered from memory, blogs, or third-party SDKs.
    (gateway process, re-auth cadence, session lifetime, IP/2FA constraints).
 6. For IBKR and Schwab specifically: re-run verification against the official
    portals from an environment that is not blocked by HTTP 403.
+
+### Items Flagged As Uncertain (Carry Into Verification)
+
+Surfaced from non-authoritative background research; each is **unverified** and
+must be confirmed empirically or from an official source before reliance:
+
+- No broker is known to officially guarantee ≥5-market-day paper persistence —
+  resolve only by empirical test (see open question 2).
+- **IBKR Sunday-night GTC purge** — plausible operational gotcha, unverified;
+  test explicitly with a resting Friday GTC.
+- **Schwab cloud-IP 403** — observed but officially unconfirmed; the structural
+  blocker is its OAuth model + lack of an API-accessible paper venue, not IP.
+- **IBKR 403s** are most likely gateway configuration (same-machine auth, IP
+  allowlist, User-Agent), not a hard IP ban — re-verification will likely
+  *resolve IBKR cleanly* but will not fix Schwab's fundamentals.
+- **Alpaca** advanced multi-leg / Greeks / index-options coverage — newest API,
+  verify live.
+- **MIAXdx / LedgerX (Rothera)** 2026 retail-API maturity and liquidity — verify
+  directly.
+- **Deribit / Coinbase ownership change** (announced 2025) — may alter US-access
+  roadmap; re-check before any crypto live decision.
 
 ## Fail-Closed Decision Rules (Carried Into Selection Step)
 
@@ -191,6 +273,15 @@ requires the open questions above to be closed with official sources.
   verification required): https://developer.schwab.com/
 - Schwab — Sandbox testing user guide (returned HTTP 403):
   https://developer.schwab.com/user-guides/apis-and-apps/test-in-sandbox
+
+### Non-Authoritative Background (NOT official-source evidence)
+
+- Archived external research (multi-model synthesis, captured 2026-06-20):
+  [`docs/research/2026-06-20-broker-api-selection-research.md`](research/2026-06-20-broker-api-selection-research.md).
+  Filed for traceability only. It contains secondary sources, forum/blog claims,
+  and self-acknowledged hallucination risk; **none of its claims are VERIFIED
+  evidence** for this report and must not flip any matrix cell. Use it as a lead
+  list for the verification gates, never as a source of record.
 
 ## Codex Review Gate
 
