@@ -48,6 +48,7 @@ from .execution_report import ExecutionReport
 from .execution_result import ExecutionResult
 from .human_required_event import HumanRequiredEvent
 from .instrument import Instrument
+from .kill_switch_state import KillSwitchState
 from .liquidity_gate import ExecutionQualityRearmToken, ExecutionQualityState, LiquidityGate
 from .order_ticket import OrderLeg, OrderLegRole, OrderRouteDecision, OrderTicket, RouteMode
 from .order_type_policy import OrderTypePolicy
@@ -104,6 +105,8 @@ __all__ = [
     "BrokerPositionReport", "ExecutionPositionLedger", "PositionLeg", "PositionSnapshot",
     "PositionSnapshotSource", "ReconciliationPermission", "ReconciliationSnapshot",
     "ReconciliationStatus",
+    # Phase 10 — human control plane
+    "KillSwitchState",
     # enums
     "AccountType", "BrokerMode", "CertificationStatus", "DrawdownTier", "EmergencyState",
     "ExecutionStatus", "ExerciseStyle", "FeedProvider", "HaltAction", "HumanRequiredKind",

@@ -44,6 +44,7 @@ from schemas import (
     BrokerSubmitIntent,
     ExecutionReport,
     HumanRequiredEvent,
+    KillSwitchState,
     OrderLifecycleState,
     OrderRouteDecision,
     OrderTicket,
@@ -51,6 +52,8 @@ from schemas import (
     PositionLeg,
     PositionSnapshot,
     PositionSnapshotSource,
+    ReArmMode,
+    ReasonCode,
     ReconciliationSnapshot,
     SubmitMode,
     ValidatedTradeIntent,
@@ -68,9 +71,10 @@ from .errors import (
 class RecordType(StrEnum):
     """Closed set of audit-store record kinds (roadmap Phase 4 'Persist:' list).
 
-    KILL_SWITCH_STATE and the non-model GATEWAY_DECISION are reserved here so the
-    schema is forward-stable, but they are not yet rehydratable — see
-    ``REHYDRATION_REGISTRY``.
+    KILL_SWITCH_STATE is a gated protected type (Phase 10): it is persistable and
+    rehydratable through store-verified provenance only. The non-model GATEWAY_DECISION
+    is reserved so the schema is forward-stable but is persisted via its components in
+    v1 — see ``REHYDRATION_REGISTRY`` and ``_GATED_REHYDRATORS``.
     """
 
     GATEWAY_REQUEST = "GATEWAY_REQUEST"
@@ -83,7 +87,7 @@ class RecordType(StrEnum):
     POSITION_SNAPSHOT = "POSITION_SNAPSHOT"        # Phase 5
     RECONCILIATION_SNAPSHOT = "RECONCILIATION_SNAPSHOT"  # Phase 5
     HUMAN_REQUIRED_EVENT = "HUMAN_REQUIRED_EVENT"
-    KILL_SWITCH_STATE = "KILL_SWITCH_STATE"        # Phase 5
+    KILL_SWITCH_STATE = "KILL_SWITCH_STATE"        # Phase 10 (gated protected type)
     AUDIT_ARTIFACT = "AUDIT_ARTIFACT"
 
 
@@ -99,6 +103,7 @@ RECORD_TYPE_BY_CLASS: dict[type[HermesModel], RecordType] = {
     PositionSnapshot: RecordType.POSITION_SNAPSHOT,
     ReconciliationSnapshot: RecordType.RECONCILIATION_SNAPSHOT,
     HumanRequiredEvent: RecordType.HUMAN_REQUIRED_EVENT,
+    KillSwitchState: RecordType.KILL_SWITCH_STATE,
     AuditArtifact: RecordType.AUDIT_ARTIFACT,
 }
 
@@ -256,6 +261,25 @@ def _rehydrate_execution_report(data: dict[str, Any]) -> ExecutionReport:
     )
 
 
+def _rehydrate_kill_switch_state(data: dict[str, Any]) -> KillSwitchState:
+    """Reconstruct a KillSwitchState through its sanctioned trusted constructor.
+
+    All fields are primitives/enums/datetime; ``_from_gateway`` re-runs the halt-field
+    coherence validator (halted <-> reason_code/rearm_mode). Like the other gated types,
+    a forged or caller-supplied payload cannot mint it: ``rehydrate_payload`` only reaches
+    this reconstructor with ``allow_gated=True``, set solely by ``AuditStore.rehydrate``
+    after it has proven the row's provenance.
+    """
+    return KillSwitchState._from_gateway(
+        halted=data["halted"],
+        reason_code=None if data["reason_code"] is None else ReasonCode(data["reason_code"]),
+        rearm_mode=None if data["rearm_mode"] is None else ReArmMode(data["rearm_mode"]),
+        command_id=data["command_id"],
+        created_at=datetime.fromisoformat(data["created_at"]),
+        note=data["note"],
+    )
+
+
 def _rehydrate_position_snapshot(data: dict[str, Any]) -> PositionSnapshot:
     """Reconstruct a PositionSnapshot through its sanctioned trusted constructor."""
     legs = tuple(PositionLeg.model_validate_json(json.dumps(leg)) for leg in data["legs"])
@@ -281,6 +305,7 @@ _GATED_REHYDRATORS = {
     RecordType.BROKER_SUBMIT_INTENT: _rehydrate_broker_submit_intent,
     RecordType.EXECUTION_REPORT: _rehydrate_execution_report,
     RecordType.POSITION_SNAPSHOT: _rehydrate_position_snapshot,
+    RecordType.KILL_SWITCH_STATE: _rehydrate_kill_switch_state,
 }
 
 
