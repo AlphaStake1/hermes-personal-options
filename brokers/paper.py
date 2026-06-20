@@ -18,12 +18,19 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from datetime import datetime
 from typing import Any
 
 from pydantic import AwareDatetime, Field, model_validator
 
-from schemas import BrokerOrderId, BrokerSubmitIntent, OrderType, ReasonCode, SubmitMode, Underlying
+from schemas import (
+    BrokerMode,
+    BrokerOrderId,
+    BrokerSubmitIntent,
+    OrderType,
+    ReasonCode,
+    SubmitMode,
+    Underlying,
+)
 from schemas.base import HermesModel
 
 from .base import BrokerAccountView, BrokerAdapter, BrokerFill, BrokerPositionView
@@ -43,6 +50,24 @@ def _parse_bool(value: str, *, name: str) -> bool:
     if normalized == "false":
         return False
     raise ValueError(f"{name} must be exactly true or false, got {value!r}")
+
+
+def _parse_broker_mode(value: str) -> BrokerMode:
+    try:
+        return BrokerMode(value)
+    except ValueError as exc:
+        allowed = ", ".join(mode.value for mode in BrokerMode)
+        raise ValueError(f"BROKER_MODE must be one of {allowed}, got {value!r}") from exc
+
+
+def _parse_positive_int(value: str, *, name: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer >= 1, got {value!r}") from exc
+    if parsed < 1:
+        raise ValueError(f"{name} must be an integer >= 1, got {value!r}")
+    return parsed
 
 
 def _parse_underlyings(value: str) -> tuple[Underlying, ...]:
@@ -67,7 +92,7 @@ class PaperBrokerConfig(HermesModel):
     confirmation is supplied.
     """
 
-    broker_mode: str = "paper"
+    broker_mode: BrokerMode = BrokerMode.PAPER
     submission_enabled: bool = False
     paper_submit_enabled: bool = False
     live_submit_enabled: bool = False
@@ -81,7 +106,9 @@ class PaperBrokerConfig(HermesModel):
         """Build config from environment-like values with Phase 9 defaults."""
         source = os.environ if env is None else env
         return cls(
-            broker_mode=source.get("BROKER_MODE", "paper"),
+            broker_mode=_parse_broker_mode(
+                source.get("BROKER_MODE", BrokerMode.PAPER.value)
+            ),
             submission_enabled=_parse_bool(
                 source.get("SUBMISSION_ENABLED", "false"),
                 name="SUBMISSION_ENABLED",
@@ -94,7 +121,10 @@ class PaperBrokerConfig(HermesModel):
                 source.get("LIVE_SUBMIT_ENABLED", "false"),
                 name="LIVE_SUBMIT_ENABLED",
             ),
-            paper_max_contracts=int(source.get("PAPER_MAX_CONTRACTS", "1")),
+            paper_max_contracts=_parse_positive_int(
+                source.get("PAPER_MAX_CONTRACTS", "1"),
+                name="PAPER_MAX_CONTRACTS",
+            ),
             paper_allowed_underlyings=_parse_underlyings(
                 source.get("PAPER_ALLOWED_UNDERLYINGS", "XSP")
             ),
@@ -114,7 +144,7 @@ class PaperBrokerConfig(HermesModel):
 
     @model_validator(mode="after")
     def _fail_closed(self) -> "PaperBrokerConfig":
-        if self.broker_mode != "paper":
+        if self.broker_mode is not BrokerMode.PAPER:
             raise ValueError("Phase 9 local paper config requires BROKER_MODE=paper")
         if self.live_submit_enabled:
             raise ValueError("LIVE_SUBMIT_ENABLED must be false for Phase 9 local paper")
@@ -218,7 +248,7 @@ class LocalPaperBroker(BrokerAdapter):
         if self._config.paper_limit_only and intent.ticket.order_type is not OrderType.LIMIT:
             raise PaperPolicyViolationError(
                 "PAPER_LIMIT_ONLY=true rejects non-LIMIT paper submissions",
-                reason_code=ReasonCode.BROKEN_SPREAD_STATE,
+                reason_code=ReasonCode.INTERNAL_CONTRADICTION,
             )
         if self._config.paper_require_human_confirm:
             self._validate_human_confirmation(intent, human_confirmation)
@@ -254,7 +284,7 @@ def paper_submit_approval_for_intent(
     intent: BrokerSubmitIntent,
     *,
     approved_by: str,
-    approved_at: datetime,
+    approved_at: AwareDatetime,
 ) -> PaperSubmitApproval:
     """Create a local human-confirmation token for a specific paper intent."""
     if not isinstance(intent, BrokerSubmitIntent):

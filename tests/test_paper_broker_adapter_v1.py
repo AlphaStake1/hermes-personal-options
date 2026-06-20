@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -22,7 +23,9 @@ from brokers import (
     paper_submit_approval_for_intent,
 )
 from gateway import OrderRoutingState, mint_broker_submit_intent, mint_order_ticket
+from replay import ReplayScenario
 from schemas import (
+    BrokerMode,
     BrokerSubmitIntent,
     CandidateTradeIntent,
     CertificationStatus,
@@ -33,6 +36,7 @@ from schemas import (
     LegSide,
     OptionType,
     OrderLifecycleState,
+    OrderTicket,
     OrderTypePolicy,
     PortfolioHeatCheck,
     ReasonCode,
@@ -132,6 +136,19 @@ def _routing_state(*, market: bool = False) -> OrderRoutingState:
     )
 
 
+def _ticket(
+    *,
+    config_underlying: Underlying = Underlying.XSP,
+    contracts: int = 1,
+    market: bool = False,
+) -> OrderTicket:
+    return mint_order_ticket(
+        _validated(underlying=config_underlying, contracts=contracts),
+        _routing_state(market=market),
+        created_at=FRESH,
+    )
+
+
 def _intent(
     *,
     config_underlying: Underlying = Underlying.XSP,
@@ -139,10 +156,10 @@ def _intent(
     submit_mode: SubmitMode = SubmitMode.PAPER,
     market: bool = False,
 ) -> BrokerSubmitIntent:
-    ticket = mint_order_ticket(
-        _validated(underlying=config_underlying, contracts=contracts),
-        _routing_state(market=market),
-        created_at=FRESH,
+    ticket = _ticket(
+        config_underlying=config_underlying,
+        contracts=contracts,
+        market=market,
     )
     return mint_broker_submit_intent(
         ticket,
@@ -171,9 +188,13 @@ def _approval(intent: BrokerSubmitIntent):
     )
 
 
+def _uninitialized_replay_scenario() -> ReplayScenario:
+    return cast(ReplayScenario, object.__new__(ReplayScenario))
+
+
 def test_default_config_matches_phase_9_required_defaults():
     config = PaperBrokerConfig()
-    assert config.broker_mode == "paper"
+    assert config.broker_mode is BrokerMode.PAPER
     assert config.submission_enabled is False
     assert config.paper_submit_enabled is False
     assert config.live_submit_enabled is False
@@ -194,6 +215,7 @@ def test_from_env_uses_phase_9_defaults_for_missing_values():
         ({"BROKER_MODE": "none"}, "BROKER_MODE=paper"),
         ({"LIVE_SUBMIT_ENABLED": "true"}, "LIVE_SUBMIT_ENABLED must be false"),
         ({"SUBMISSION_ENABLED": "yes"}, "SUBMISSION_ENABLED must be exactly true or false"),
+        ({"PAPER_MAX_CONTRACTS": "abc"}, "PAPER_MAX_CONTRACTS must be an integer >= 1"),
         ({"PAPER_ALLOWED_UNDERLYINGS": ""}, "must not be empty"),
         ({"PAPER_ALLOWED_UNDERLYINGS": "SPY"}, "unsupported"),
     ],
@@ -204,7 +226,9 @@ def test_from_env_rejects_fail_open_or_ambiguous_values(env: dict[str, str], mat
 
 
 def test_env_example_contains_phase_9_paper_defaults():
-    text = Path(".env.example").read_text(encoding="utf-8")
+    text = (Path(__file__).resolve().parent.parent / ".env.example").read_text(
+        encoding="utf-8"
+    )
     for expected in (
         "BROKER_MODE=paper",
         "SUBMISSION_ENABLED=false",
@@ -226,15 +250,34 @@ def test_default_local_paper_broker_blocks_submit_before_inner_broker_call():
     assert broker.get_open_orders() == ()
 
 
+def test_half_armed_paper_submit_env_stays_disarmed():
+    config = PaperBrokerConfig.from_env({"PAPER_SUBMIT_ENABLED": "true"})
+    assert config.paper_submission_armed is False
+
+    broker = LocalPaperBroker(config=config, inner=FakeFillBroker(clock=NOW))
+    with pytest.raises(PaperSubmissionDisabledError) as exc:
+        broker.submit_order(_intent())
+    assert exc.value.reason_code is ReasonCode.HUMAN_REARM_REQUIRED
+    assert broker.get_open_orders() == ()
+
+
+def test_direct_config_rejects_live_submit_enabled():
+    with pytest.raises(ValueError, match="LIVE_SUBMIT_ENABLED must be false"):
+        PaperBrokerConfig(live_submit_enabled=True)
+
+
 @pytest.mark.parametrize(
     "payload",
     [
         pytest.param(_candidate(), id="candidate"),
+        pytest.param(_validated(), id="validated-intent"),
+        pytest.param(_ticket(), id="order-ticket"),
+        pytest.param(_uninitialized_replay_scenario(), id="replay-scenario"),
         pytest.param({"idempotency_key": "x"}, id="dict"),
         pytest.param("please submit this paper order", id="prose"),
     ],
 )
-def test_local_paper_broker_rejects_raw_candidate_dict_and_prose(payload: object):
+def test_local_paper_broker_rejects_non_submit_intent_payloads(payload: object):
     broker = LocalPaperBroker(config=_armed_config(paper_require_human_confirm=False))
     with pytest.raises(TypeError):
         broker.submit_order(payload)  # type: ignore[arg-type]
@@ -313,7 +356,7 @@ def test_limit_only_policy_rejects_market_order_even_in_emergency_state():
     broker = LocalPaperBroker(config=_armed_config(paper_require_human_confirm=False))
     with pytest.raises(PaperPolicyViolationError) as exc:
         broker.submit_order(_intent(market=True))
-    assert exc.value.reason_code is ReasonCode.BROKEN_SPREAD_STATE
+    assert exc.value.reason_code is ReasonCode.INTERNAL_CONTRADICTION
 
 
 def test_local_paper_cancel_drill_uses_fake_order_state_without_network():

@@ -18,6 +18,7 @@ from .daily_rationale import DailyRationale
 from .drawdown_state import DrawdownHaltState, required_rearm_mode
 from .enums import (
     AccountType,
+    BrokerMode,
     CertificationStatus,
     DrawdownTier,
     EmergencyState,
@@ -104,7 +105,7 @@ __all__ = [
     "PositionSnapshotSource", "ReconciliationPermission", "ReconciliationSnapshot",
     "ReconciliationStatus",
     # enums
-    "AccountType", "CertificationStatus", "DrawdownTier", "EmergencyState",
+    "AccountType", "BrokerMode", "CertificationStatus", "DrawdownTier", "EmergencyState",
     "ExecutionStatus", "ExerciseStyle", "FeedProvider", "HaltAction", "HumanRequiredKind",
     "IntentStatus", "LegSide", "MacroEvent", "OptionType", "OrderLifecycleState",
     "OrderType", "PromotionDrill", "ReArmMode", "ReasonCode", "SettlementStyle",
