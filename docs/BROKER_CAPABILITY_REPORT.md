@@ -55,7 +55,7 @@ VERIFIED / PARTIAL / UNVERIFIED with the controlling caveat.
 |---|---|---|---|---|
 | **XSP / SPX options** | PARTIAL — official IBKR page lists SPX, XSP (1/10), Nano (1/100); direct fetch returned 403, corroborated via official-domain excerpt | **VERIFIED** — Tradier provides SPX, VIX, XSP | **VERIFIED** — index options incl. XSP; cash-settled index option specs published | UNVERIFIED — portal blocked (403); requires manual official check |
 | **Multi-leg / combo orders** | UNVERIFIED — combo/BAG exists in API but not confirmed from a fetched official page this pass | **VERIFIED** — multileg up to 4 legs; combo endpoint published | **VERIFIED** — complex / multi-leg orders + cancel-replace published | UNVERIFIED — portal blocked (403) |
-| **Paper options orders (via API)** | PARTIAL — paper account is API-accessible but **requires a fully open & funded live account**; direct fetch 403 | **VERIFIED** — `sandbox.tradier.com` runs the full trading API with paper money | PARTIAL — `api.cert.tastyworks.com` simulates orders but **resets every 24h** (see caveat) | UNVERIFIED — API sandbox order-execution semantics not confirmed; thinkorswim paperMoney is a desktop platform, not confirmed exposed via Trader API |
+| **Paper options orders (via API)** | PARTIAL — paper account is API-accessible but **requires a fully open & funded live account**; direct fetch 403 | PARTIAL — `sandbox.tradier.com` runs the full trading API with paper money, but **≥5-market-day paper persistence (no forced reset) is UNVERIFIED** (see caveat) | PARTIAL — `api.cert.tastyworks.com` simulates orders but **resets every 24h** (see caveat) | UNVERIFIED — API sandbox order-execution semantics not confirmed; thinkorswim paperMoney is a desktop platform, not confirmed exposed via Trader API |
 | **Status / fill / cancel endpoints** | UNVERIFIED — not confirmed from a fetched official page this pass | **VERIFIED** — GET order by id, Change Order, Cancel Order published | **VERIFIED** — dry-run, cancel, cancel-replace, live order retrieval published | UNVERIFIED — portal blocked (403) |
 | **Market data entitlements** | UNVERIFIED — paper uses live subscriptions; entitlement detail not fetched | PARTIAL — sandbox data is **delayed**; real-time index data needs a verified entitlement | PARTIAL — sandbox quotes **always 15-min delayed**; real-time needs production + market-data agreement | UNVERIFIED — portal blocked (403) |
 | **Local / headless constraints** | PARTIAL — Web/TWS API typically needs a running IB Gateway / Client Portal Gateway process and periodic re-auth; not officially re-confirmed this pass | **VERIFIED** — pure REST + bearer token; no desktop gateway process required | **VERIFIED** — REST + websocket with session/OAuth token; no desktop gateway required | UNVERIFIED — portal blocked (403) |
@@ -84,9 +84,15 @@ VERIFIED / PARTIAL / UNVERIFIED with the controlling caveat.
   combo endpoint, plus order **status (GET order), change, and cancel**
   endpoints.
 - Tradier exposes a dedicated **sandbox** at `sandbox.tradier.com` that runs the
-  full trading API with **paper money and delayed market data** — a persistent
-  paper path that does not reset on a fixed daily cycle (unlike tastytrade's
-  cert environment, see below).
+  full trading API with **paper money and delayed market data**.
+- **Paper persistence is UNVERIFIED (fail closed):** this pass found no official
+  statement on whether the Tradier sandbox persists open paper orders/positions
+  for **≥5 market days without a forced reset**. The report does **not** assume
+  Tradier persists longer than tastytrade's cert sandbox; the only verified
+  difference is that tastytrade officially documents a 24h reset, whereas
+  Tradier's reset behavior is simply **not documented here** — which is treated
+  as unsupported, not favorable. An official source for ≥5-day persistence must
+  be obtained before relying on Tradier for the 5-market-day exit criterion.
 - Auth model is **REST + bearer token**, with **no desktop gateway process**,
   which is favorable for local/headless operation.
 - Open item: real-time index market-data entitlement for production (sandbox is
