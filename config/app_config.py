@@ -232,9 +232,38 @@ class AppConfig(HermesModel):
                 raise ValueError(f"APP_ENV=vm_shadow requires {name}=true")
 
     def _require_paper_invariants(self) -> None:
+        # Phase 12 (VM Paper Trading) requires the EXACT paper profile (roadmap
+        # §Phase 12). Unlike vm_shadow, vm_paper ARMS the paper submit lane, so the
+        # submit flags must be explicitly on — and only the paper lane, never live.
         if self.broker_mode is not BrokerMode.PAPER:
             raise ValueError("APP_ENV=vm_paper requires BROKER_MODE=paper")
-        # live_submit already globally rejected above.
+        if not self.submission_enabled:
+            raise ValueError("APP_ENV=vm_paper requires SUBMISSION_ENABLED=true")
+        if not self.paper_submit_enabled:
+            raise ValueError("APP_ENV=vm_paper requires PAPER_SUBMIT_ENABLED=true")
+        # live_submit is already globally rejected in _fail_closed step 1; assert it
+        # here too so a vm_paper misconfig yields the env-specific message.
+        if self.live_submit_enabled:
+            raise ValueError("APP_ENV=vm_paper requires LIVE_SUBMIT_ENABLED=false")
+        # The full decision pipeline must be on: paper trading layers submission on
+        # top of the same read-only-data -> candidate -> gateway -> ticketing pipeline
+        # that vm_shadow runs. Running paper with any of these off is a misconfiguration,
+        # not a permitted variant — fail closed.
+        for name, value in (
+            ("MARKET_DATA_ENABLED", self.market_data_enabled),
+            ("CANDIDATE_GENERATION_ENABLED", self.candidate_generation_enabled),
+            ("GATEWAY_ENABLED", self.gateway_enabled),
+            ("ORDER_TICKETING_ENABLED", self.order_ticketing_enabled),
+        ):
+            if not value:
+                raise ValueError(f"APP_ENV=vm_paper requires {name}=true")
+        # The remaining roadmap §Phase 12 paper knobs — MAX_CONTRACTS, LIMIT_ONLY,
+        # REQUIRE_HUMAN_CONFIRM — are deliberately NOT AppConfig fields. They are paper
+        # *broker policy*, not deployment submit-lane flags, so they are owned and
+        # enforced deterministically by brokers.PaperBrokerConfig / LocalPaperBroker at
+        # submit time. REQUIRE_HUMAN_CONFIRM is additionally re-asserted (must be true)
+        # by services.paper_cycle.require_paper_safe for the P1 cycle. Duplicating those
+        # fields here would split their single source of truth.
 
     def _require_live_readonly_invariants(self) -> None:
         if self.broker_mode is not BrokerMode.LIVE_READONLY:
