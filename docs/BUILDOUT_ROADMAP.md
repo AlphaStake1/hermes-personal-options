@@ -515,6 +515,11 @@ summarize reports but cannot edit report records.
 
 Suggested branch: `agent-layer-readonly-v1`
 
+Harness: **Claude Agent SDK** (World A only; approved 2026-06-21). Full
+integration spec — allowed/forbidden tools, the three-environment credential
+split, and the typed-object boundary — lives in
+`docs/CLAUDE_AGENT_SDK_INTEGRATION.md`.
+
 Agents:
 
 - `ResearchAgent`
@@ -528,7 +533,10 @@ Allowed:
 - Read market/audit/report data.
 - Explain or summarize.
 - Propose `CandidateTradeIntent` only through typed schema parsing with
-  `extra="forbid"`.
+  `extra="forbid"`. The agent emits a `CandidateTradeIntent` and mints **nothing
+  protected** — it has no `order_type` and no approval tokens, so it cannot be
+  routed; only the Gateway mints `ValidatedTradeIntent` and the other six
+  protected objects (`schemas/trade_intent.py:58,137`).
 
 Forbidden:
 
@@ -538,6 +546,9 @@ Forbidden:
 - No kill switch edits.
 - No route mode, order type, policy config, max contracts, or broker
   submission changes.
+
+The `forbidden_tools` list in `docs/CLAUDE_AGENT_SDK_INTEGRATION.md` is the
+enforcement surface for these prohibitions.
 
 Tests:
 
