@@ -410,7 +410,7 @@ Rules:
 - Every command writes audit event.
 - Strategy/research agents cannot issue commands.
 
-## Phase 11: Hostinger VM Shadow Deploy
+## Phase 11: VM Shadow Deploy
 
 Suggested branch: `vm-shadow-deploy-v1`
 
@@ -425,6 +425,8 @@ Purpose:
 
 Deployment:
 
+- Provider-neutral target. The current preferred provider is DigitalOcean; earlier
+  Hostinger references are not architectural requirements.
 - Docker Compose only in v1.
 - Services: `hermes-app`, `hermes-worker`, `hermes-reporter`, `hermes-db`.
 - Use mounted SQLite volume for shadow mode if write volume stays low.
