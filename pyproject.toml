@@ -8,6 +8,18 @@ dependencies = [
     "tzdata>=2024.1",
 ]
 
+[project.optional-dependencies]
+# World-A-only research/proposal harness (roadmap Phase 14). NOT a runtime dependency:
+# the deterministic Hermes runtime and the test suite never import these. Installed only
+# on a local dev workbench or a separated World-A agent surface, never inside the
+# deterministic runtime process/container and never beside broker credentials
+# (docs/CLAUDE_AGENT_SDK_INTEGRATION.md §1, §5). Version floors are conservative and
+# should be confirmed when the World-A workbench is provisioned.
+agents = [
+    "claude-agent-sdk>=0.1.0",
+    "pydantic-ai>=0.1.0",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",
@@ -44,4 +56,4 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["brokers", "config", "data", "gateway", "ops", "replay", "schemas", "services", "storage", "strategies"]
+known-first-party = ["agents", "brokers", "config", "data", "gateway", "ops", "replay", "reports", "schemas", "services", "storage", "strategies"]
