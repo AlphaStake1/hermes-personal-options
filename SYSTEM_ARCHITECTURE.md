@@ -21,6 +21,41 @@ This is a **personal capital machine** — not a fund. There is no LP reporting,
 
 ---
 
+## 1A. Autonomy Ladder
+
+Hermes is an **autonomous deterministic trading system, AI-assisted but not
+AI-controlled**. AI agents may learn, research, summarize, propose, code through
+reviewed PRs, and improve operator workflows over time. They do not make live
+execution decisions. Any behavior that can move money must be expressed as
+reviewed deterministic policy, typed inputs, bounded risk limits, and
+fail-closed code.
+
+Hermes is not designed for LLM-as-trader autonomy. It is designed to progress
+toward deterministic automation under evidence, audit, and human-governed
+policy changes.
+
+| Stage | Automation level | Boundary |
+|-------|------------------|----------|
+| 1 | AI observes, summarizes, and drafts reports | No trading authority |
+| 2 | Deterministic runtime shadow-trades | No order submission |
+| 3 | Paper auto-submit under strict deterministic limits | Human confirmation may be required by policy |
+| 4 | Live read-only reconciliation | No live submit |
+| 5 | Live micro-size auto-submit under pre-approved constraints | Deterministic gateway owns approval/submission |
+| 6 | Scaled live automation | Only after audit evidence and explicit human policy promotion |
+
+The human operator's long-term role may become risk governor and exception
+handler, but not because an LLM gains execution authority. Autonomy increases
+only when deterministic code has earned that authority through tests, replay,
+shadow evidence, paper evidence, audit review, and explicit policy promotion.
+
+AI "daily judgment" belongs in the advisory layer: research hypotheses,
+post-trade analysis, anomaly summaries, PR proposals, and risk narratives.
+Runtime "daily judgment" belongs in deterministic code: candidate eligibility,
+sizing, routing, submission, cancel/flatten rules, reconciliation, and halt
+state.
+
+---
+
 ## 2. Five-Layer Governance Model
 
 | Layer | Component | Function |
@@ -45,7 +80,7 @@ Roles are **functions, not fixed vendors.** Critically, **no LLM is ever the exe
 | **Strategic Orchestrator** | Strike selection, break-even math, tranche sizing, typed `TradeIntent` generation | Claude / Deep Agents / LangGraph |
 | **Code Builder / Verifier** | Build, test, refactor, generate PRs, write failing tests for illegal payloads | Claude Code and/or OpenAI Agents SDK ("Codex") |
 | **Deterministic Executor** | Validate, route, reconcile, manage order lifecycle | **Plain Python application code + Temporal — never an LLM** |
-| **Operator Surface / Memory** | Long-term research memory, UI, workflow continuity, summaries | Hermes (proposes only; cannot bypass the Gateway) |
+| **Operator Surface / Memory** | Long-term research memory, UI, workflow continuity, summaries, scheduled reports, and agent coordination | NousResearch Hermes Agent / Hermes Desktop (World A only; proposes only; cannot bypass the Gateway) |
 | **Schema Boundary** | Validate all LLM outputs into typed objects | PydanticAI |
 
 > Note: the earlier blueprint named "Codex" as the executor. That is a category error and is corrected here — Codex (an LLM) may build the executor; it is not the executor.
@@ -135,13 +170,13 @@ Claude Code is wrapped in pre-tool hooks. Any attempt to modify `tests/`, `polic
 | Repository law | `AGENTS.md`, `CONSTITUTION.md`, `policy/*.yaml` | Agent operating rules |
 | Coding harness | Claude Code + optional OpenAI Agents SDK | Build, test, refactor, PRs |
 | Research harness | Deep Agents / LangGraph | Multi-agent research, scanners, backtests |
-| Memory / operator surface | Hermes | Research memory, UI, continuity |
+| Memory / operator surface | NousResearch Hermes Agent / Hermes Desktop | Research memory, UI, continuity, scheduled reports, workflow learning; World A only |
 | Schema boundary | PydanticAI | Validate all LLM outputs |
 | Workflow durability | Temporal | Durable workflow execution with **idempotent** external side effects. (Temporal provides durable execution, not "exactly-once" exchange calls — activities are at-least-once or at-most-once; all broker-facing activities must be idempotent.) |
 | Execution enforcement | Custom Python gateway | Deterministic pre-trade approval |
 | Broker / data | IBKR / Tradier / Tastytrade + Polygon cross-check | Order access + two-source price gate |
 | State / cache | PostgreSQL (Neon/Supabase) + Redis/Valkey | SQL state + fast lookups |
-| Hosting | Hostinger Ubuntu VM (headless, isolated) | Compute |
+| Hosting | DigitalOcean Ubuntu droplets (separate build/shadow/live environments) | Compute |
 | Observability | Grafana + logs + Telegram alerts | Human oversight |
 | Safety | Claude Code hooks + CI checks | Block dangerous repo changes |
 
