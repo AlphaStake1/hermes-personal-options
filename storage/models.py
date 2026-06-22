@@ -39,6 +39,7 @@ from typing import Any
 from pydantic import AwareDatetime, Field
 
 from gateway.request import GatewayRequest
+from reports.records import DailyReport, RiskReport
 from schemas import (
     AuditArtifact,
     BrokerSubmitIntent,
@@ -89,6 +90,8 @@ class RecordType(StrEnum):
     HUMAN_REQUIRED_EVENT = "HUMAN_REQUIRED_EVENT"
     KILL_SWITCH_STATE = "KILL_SWITCH_STATE"        # Phase 10 (gated protected type)
     AUDIT_ARTIFACT = "AUDIT_ARTIFACT"
+    DAILY_REPORT = "DAILY_REPORT"                  # Phase 13 (non-gated report record)
+    RISK_REPORT = "RISK_REPORT"                    # Phase 13 (non-gated report record)
 
 
 # Exact-class -> RecordType. Exact type match (not isinstance) so a subclass is never
@@ -105,6 +108,11 @@ RECORD_TYPE_BY_CLASS: dict[type[HermesModel], RecordType] = {
     HumanRequiredEvent: RecordType.HUMAN_REQUIRED_EVENT,
     KillSwitchState: RecordType.KILL_SWITCH_STATE,
     AuditArtifact: RecordType.AUDIT_ARTIFACT,
+    # Phase 13 report records — non-gated. They mint nothing protected and are publicly
+    # constructible (like AuditArtifact), so rehydrating them via the free path below
+    # grants no execution capability. They are NOT in ``_GATED_REHYDRATORS``.
+    DailyReport: RecordType.DAILY_REPORT,
+    RiskReport: RecordType.RISK_REPORT,
 }
 
 # RecordType -> model class for trusted rehydration. Only types that EXIST today are
@@ -193,6 +201,8 @@ def derive_record_id(obj: HermesModel) -> str:
         return obj.snapshot_id
     if isinstance(obj, ReconciliationSnapshot):
         return obj.reconciliation_id
+    if isinstance(obj, (DailyReport, RiskReport)):
+        return obj.report_id
     if isinstance(obj, OrderTicket):
         return derive_order_ticket_hash(obj) or _content_id(obj)
     return _content_id(obj)
