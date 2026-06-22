@@ -80,7 +80,7 @@ Roles are **functions, not fixed vendors.** Critically, **no LLM is ever the exe
 | **Strategic Orchestrator** | Strike selection, break-even math, tranche sizing, typed `TradeIntent` generation | Claude / Deep Agents / LangGraph |
 | **Code Builder / Verifier** | Build, test, refactor, generate PRs, write failing tests for illegal payloads | Claude Code and/or OpenAI Agents SDK ("Codex") |
 | **Deterministic Executor** | Validate, route, reconcile, manage order lifecycle | **Plain Python application code + Temporal — never an LLM** |
-| **Operator Surface / Memory** | Long-term research memory, UI, workflow continuity, summaries, scheduled reports, and agent coordination | NousResearch Hermes Agent / Hermes Desktop (World A only; proposes only; cannot bypass the Gateway) |
+| **Operator Surface / Memory** | Long-term research memory, UI, workflow continuity, summaries, scheduled reports, and agent coordination | NousResearch Hermes Agent / Hermes Desktop / Claude Agent SDK (World A only; approved 2026-06-21; proposes only; cannot bypass the Gateway — see `docs/CLAUDE_AGENT_SDK_INTEGRATION.md`) |
 | **Schema Boundary** | Validate all LLM outputs into typed objects | PydanticAI |
 
 > Note: the earlier blueprint named "Codex" as the executor. That is a category error and is corrected here — Codex (an LLM) may build the executor; it is not the executor.
@@ -170,7 +170,7 @@ Claude Code is wrapped in pre-tool hooks. Any attempt to modify `tests/`, `polic
 | Repository law | `AGENTS.md`, `CONSTITUTION.md`, `policy/*.yaml` | Agent operating rules |
 | Coding harness | Claude Code + optional OpenAI Agents SDK | Build, test, refactor, PRs |
 | Research harness | Deep Agents / LangGraph | Multi-agent research, scanners, backtests |
-| Memory / operator surface | NousResearch Hermes Agent / Hermes Desktop | Research memory, UI, continuity, scheduled reports, workflow learning; World A only |
+| Memory / operator surface | NousResearch Hermes Agent / Hermes Desktop / Claude Agent SDK | Research memory, UI, continuity, scheduled reports, workflow learning; World A only (Claude Agent SDK approved 2026-06-21 — see `docs/CLAUDE_AGENT_SDK_INTEGRATION.md`) |
 | Schema boundary | PydanticAI | Validate all LLM outputs |
 | Workflow durability | Temporal | Durable workflow execution with **idempotent** external side effects. (Temporal provides durable execution, not "exactly-once" exchange calls — activities are at-least-once or at-most-once; all broker-facing activities must be idempotent.) |
 | Execution enforcement | Custom Python gateway | Deterministic pre-trade approval |
