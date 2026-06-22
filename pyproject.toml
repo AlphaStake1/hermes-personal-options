@@ -44,4 +44,4 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["brokers", "data", "gateway", "ops", "replay", "schemas", "storage", "strategies"]
+known-first-party = ["brokers", "config", "data", "gateway", "ops", "replay", "schemas", "services", "storage", "strategies"]
