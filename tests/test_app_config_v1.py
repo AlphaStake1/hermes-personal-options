@@ -157,20 +157,22 @@ def test_from_env_empty_environment_is_rejected():
         ),
         (_shadow_env(GATEWAY_ENABLED="false"), "requires GATEWAY_ENABLED=true"),
         (_shadow_env(ORDER_TICKETING_ENABLED="false"), "requires ORDER_TICKETING_ENABLED=true"),
-        # Submission lane/master must agree (fail closed on ambiguous arming).
+        # vm_paper requires the exact armed paper profile: both submission flags on
+        # (Phase 12). The env-specific invariant fires before the generic lane-agreement
+        # check, so the message names the missing vm_paper flag directly.
         (
             _shadow_env(
                 APP_ENV="vm_paper", BROKER_MODE="paper",
                 SUBMISSION_ENABLED="true", PAPER_SUBMIT_ENABLED="false",
             ),
-            "requires a concrete submit lane",
+            "vm_paper requires PAPER_SUBMIT_ENABLED=true",
         ),
         (
             _shadow_env(
                 APP_ENV="vm_paper", BROKER_MODE="paper",
                 SUBMISSION_ENABLED="false", PAPER_SUBMIT_ENABLED="true",
             ),
-            "PAPER_SUBMIT_ENABLED=true requires SUBMISSION_ENABLED=true",
+            "vm_paper requires SUBMISSION_ENABLED=true",
         ),
     ],
 )

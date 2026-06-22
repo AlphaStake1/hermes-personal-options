@@ -1,0 +1,75 @@
+# Hermes VM Paper Deploy — Phase 12 (provider-neutral Ubuntu + Docker Compose).
+#
+# PAPER MODE ONLY. Every service runs with BROKER_MODE=paper, the PAPER submit lane
+# armed, LIVE_SUBMIT_ENABLED=false, and per-order human confirmation required
+# (enforced by config.AppConfig, services.paper_cycle, and brokers.LocalPaperBroker).
+# NO live broker credentials are present. The default env file is the committed,
+# secret-free template so `docker compose config` works before a VM exists. On a
+# droplet, point HERMES_VM_PAPER_ENV_FILE at the chmod-600 host copy in
+# /opt/hermes/secrets/.
+#
+# This file is repo-side scaffolding. It does not provision a VM and does not run
+# until an operator deploys it deliberately. The default hermes-app loop is a paper
+# LIVENESS cycle: it submits nothing until a candidate + per-order confirmation
+# pipeline is deliberately wired in.
+
+x-hermes-image: &hermes-image
+  build:
+    context: ..
+    dockerfile: infra/Dockerfile
+  image: hermes-paper:local
+  env_file:
+    - ${HERMES_VM_PAPER_ENV_FILE:-hermes.vm_paper.env.example}
+  volumes:
+    - /opt/hermes/data:/opt/hermes/data
+    - /opt/hermes/logs:/opt/hermes/logs
+  restart: unless-stopped
+
+services:
+  # SQLite has no server process. This init container only ensures the shared
+  # data/log directories exist and are writable, then exits 0. The other services
+  # wait for it.
+  hermes-db:
+    <<: *hermes-image
+    restart: "no"
+    command:
+      - python
+      - -c
+      - "import os; [os.makedirs(p, exist_ok=True) for p in ('/opt/hermes/data', '/opt/hermes/logs')]; print('hermes-db: shared volumes ready')"
+
+  # The paper application loop: one deterministic liveness cycle (config + broker
+  # gate -> startup audit -> heartbeat) per interval. It SUBMITS NOTHING on its own;
+  # an actual paper submit requires a per-order human-confirmation token.
+  hermes-app:
+    <<: *hermes-image
+    depends_on:
+      hermes-db:
+        condition: service_completed_successfully
+    command: ["bash", "infra/deploy/run_paper_loop.sh"]
+    healthcheck:
+      test: ["CMD", "python", "infra/deploy/heartbeat_age.py"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # Phase 12 placeholder. There is no background workload yet (no Temporal, no
+  # scheduler). Real worker logic (the candidate + confirmation pipeline) lands in a
+  # later phase. No autonomous submission path.
+  hermes-worker:
+    <<: *hermes-image
+    depends_on:
+      hermes-db:
+        condition: service_completed_successfully
+    command:
+      - python
+      - -c
+      - "import time; print('hermes-worker: Phase 12 placeholder, no workload', flush=True); time.sleep(2**31)"
+
+  # Periodically exports the append-only audit log to JSONL for off-box review.
+  hermes-reporter:
+    <<: *hermes-image
+    depends_on:
+      hermes-db:
+        condition: service_completed_successfully
+    command: ["bash", "infra/deploy/run_reporter_loop.sh"]

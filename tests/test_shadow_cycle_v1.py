@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import ast
 import inspect
+import subprocess
+import sys
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -89,13 +91,41 @@ def test_shadow_cycle_module_has_no_broker_or_submit_path():
     assert not hasattr(shadow_cycle, "BrokerSubmitIntent")
 
 
+def test_importing_services_package_stays_broker_free():
+    """`python -m services` imports the package __init__ before __main__; the shadow
+    entrypoint path must not pull in broker code. Run in a fresh interpreter because
+    other tests in this session import `brokers` into sys.modules.
+
+    This guards the Phase 11 invariant against a regression like an eager
+    `from .paper_cycle import ...` in services/__init__.py (paper_cycle imports brokers).
+    """
+    code = (
+        "import services\n"
+        "import sys\n"
+        "leaked = sorted(m for m in sys.modules if m == 'brokers' or m.startswith('brokers.'))\n"
+        "assert not leaked, leaked\n"
+    )
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 # --- fail closed: non-shadow configs are refused ----------------------------
+
+
+# A valid, armed vm_paper config (Phase 12) — the shadow cycle must still refuse it.
+VALID_PAPER_ENV: dict[str, str] = {
+    **VALID_SHADOW_ENV,
+    "APP_ENV": "vm_paper",
+    "BROKER_MODE": "paper",
+    "SUBMISSION_ENABLED": "true",
+    "PAPER_SUBMIT_ENABLED": "true",
+}
 
 
 @pytest.mark.parametrize(
     "env",
     [
-        {**VALID_SHADOW_ENV, "APP_ENV": "vm_paper", "BROKER_MODE": "paper"},
+        VALID_PAPER_ENV,
         {**VALID_SHADOW_ENV, "APP_ENV": "live_readonly", "BROKER_MODE": "live_readonly"},
         {
             **VALID_SHADOW_ENV,
@@ -111,9 +141,7 @@ def test_require_shadow_safe_rejects_non_shadow_env(env: dict[str, str]):
 
 
 def test_run_shadow_cycle_rejects_non_shadow_config(store):
-    config = AppConfig.from_env(
-        {**VALID_SHADOW_ENV, "APP_ENV": "vm_paper", "BROKER_MODE": "paper"}
-    )
+    config = AppConfig.from_env(VALID_PAPER_ENV)
     with pytest.raises(ShadowConfigError):
         run_shadow_cycle(config, store, recorded_at=RECORDED_AT)
 
