@@ -107,6 +107,27 @@ expects Claude to draft and the Stop hook to request Codex review. Codex may
 implement a whole phase only when the human explicitly asks Codex to do so or
 when the human explicitly overrides the Claude-first workflow for that task.
 
+## Claude Phase-Start Handoff Check
+
+Codex writes phase-start handoffs to an ignored local file:
+
+```text
+.claude/agent-memory-local/codex-to-claude-phase-N.md
+```
+
+A clean `git status` hides these, so Claude must not rely on the human to relay
+them. Before drafting or planning any phase, Claude must read the newest handoff:
+
+```bash
+scripts/latest-codex-handoff.sh
+```
+
+Treat the printed handoff as the authoritative phase brief: target branch,
+required reading, scope, verification commands, and hard safety boundaries. If
+the script reports no handoff, ask the human or Codex to create one before
+starting phase work rather than inferring the phase scope. See
+`docs/CODEX_PHASE_ORCHESTRATION.md` for the full retrieval rule.
+
 ## Parallelization Rules
 
 Use parallel workers when tasks are independent:

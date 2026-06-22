@@ -50,6 +50,29 @@ Before starting work for a phase, Codex must:
 5. If the human explicitly asks Codex to implement solo, state that this
    overrides the default Claude-first workflow for that task.
 
+## Phase-Start Handoff Retrieval (Claude)
+
+The handoff file is gitignored, so a clean working tree gives Claude no signal
+that a new phase brief exists. Claude must retrieve it explicitly before
+starting phase work instead of waiting for the human to paste it:
+
+```bash
+scripts/latest-codex-handoff.sh
+```
+
+This prints the newest `codex-to-claude-phase-*.md` (path plus contents),
+selected by highest phase number. Claude must:
+
+1. Run it before drafting or planning a phase.
+2. Treat the printed handoff as the phase brief: target branch, required
+   reading, scope, verification commands, and hard safety boundaries.
+3. If no handoff is found, stop and ask the human or Codex to create one rather
+   than inferring phase scope.
+
+Use `scripts/latest-codex-handoff.sh --path-only` when only the file path is
+needed, for example from a future `UserPromptSubmit` hook that surfaces the
+handoff automatically.
+
 ## What Codex Should Do By Default
 
 Codex should:
