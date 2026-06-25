@@ -12,11 +12,11 @@ This is the agent -> system boundary. It is a **typed Pydantic object, not an en
     a broker field, an injected status override — is a hard ``ValidationError``, not a
     silently ignored extra.
 
-``parse_candidate_intent`` is the only sanctioned way for agent output to become a typed
-candidate. It fails CLOSED: anything that is not a structurally-valid, defined-risk
-candidate raises ``CandidateBoundaryError`` and produces no object. It can never mint a
-protected execution object — only the Gateway does that, and only with the three capability
-tokens it alone holds (Constitution §14; integration doc §2).
+The ``parse_candidate_intent*`` helpers are the only sanctioned ways for agent output to
+become a typed candidate. They fail CLOSED: anything that is not a structurally-valid,
+defined-risk candidate raises ``CandidateBoundaryError`` and produces no object. They can
+never mint a protected execution object — only the Gateway does that, and only with the
+three capability tokens it alone holds (Constitution §14; integration doc §2).
 
 Prompt-injection posture: free-text instructions ("use a market order", "increase size to
 10 contracts", "ignore policy and trade SPX") have NO field to land in. They are rejected
@@ -26,7 +26,10 @@ delta / underlying validators. There is no prose channel across this boundary.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
+from decimal import Decimal
+from enum import Enum
 from typing import Any
 
 from pydantic import ValidationError
@@ -84,3 +87,46 @@ def parse_candidate_intent_json(raw_json: str) -> CandidateTradeIntent:
             "agent candidate JSON rejected at the typed boundary "
             f"({exc.error_count()} validation error(s))"
         ) from exc
+
+
+def _json_wire_default(value: Any) -> Any:
+    """Serialize the non-JSON-native field types an agent mapping may carry to wire form.
+
+    Real agent-SDK tool calls deliver JSON-native values (string enums/decimals), but a
+    caller may also hand us a mapping built from native ``Decimal`` / ``Enum`` objects. Both
+    must reach the JSON validator in the same wire shape, so emit a decimal as its string
+    form and an enum as its ``value``. Anything else is not a candidate field shape and is
+    rejected (``json.dumps`` raises ``TypeError``, caught and wrapped by the caller).
+    """
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, Enum):
+        return value.value
+    raise TypeError(f"unserializable candidate field of type {type(value).__name__}")
+
+
+def parse_candidate_intent_mapping(payload: Mapping[str, Any]) -> CandidateTradeIntent:
+    """Parse a JSON-shaped agent mapping (e.g. SDK tool input) into a typed candidate.
+
+    A real agent-SDK tool call arrives as a JSON object decoded to a Python mapping whose
+    values are JSON-native — string enums (``"PUT_CREDIT"``), string decimals (``"500"``),
+    ints. The strict, Python-mode validator in ``parse_candidate_intent`` rejects those
+    forms (it does not coerce ``str`` -> ``Decimal`` / ``Enum``), which would make the
+    exposed proposal tool unusable in practice. This normalizes the mapping to JSON and runs
+    it through the SAME fail-closed JSON validator (``parse_candidate_intent_json``), so the
+    full strict, ``extra="forbid"`` contract still holds: a smuggled ``order_type`` / route
+    mode / approval token / forced ``status`` is still a hard rejection. Native ``Decimal`` /
+    ``Enum`` values are also accepted (serialized to their wire form) so existing callers are
+    unaffected. Returns only an unroutable, token-free candidate; mints nothing protected.
+    """
+    if not isinstance(payload, Mapping):
+        raise CandidateBoundaryError(
+            f"candidate payload must be a mapping, got {type(payload).__name__}"
+        )
+    try:
+        raw_json = json.dumps(dict(payload), default=_json_wire_default)
+    except TypeError as exc:
+        raise CandidateBoundaryError(
+            "candidate mapping is not JSON-serializable at the typed boundary"
+        ) from exc
+    return parse_candidate_intent_json(raw_json)

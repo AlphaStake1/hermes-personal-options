@@ -68,11 +68,21 @@ def test_valid_vm_paper_config_allows_paper_submission():
 
 
 def test_valid_live_readonly_config_constructs_without_submission():
+    # live_readonly is NOT a shadow variant: it reconciles live read-only data and acts on
+    # nothing, so candidate generation and order ticketing must be off (roadmap §Phase 15).
     config = AppConfig.from_env(
-        _shadow_env(APP_ENV="live_readonly", BROKER_MODE="live_readonly", MARKET_DATA_ENABLED="true")
+        _shadow_env(
+            APP_ENV="live_readonly",
+            BROKER_MODE="live_readonly",
+            MARKET_DATA_ENABLED="true",
+            CANDIDATE_GENERATION_ENABLED="false",
+            ORDER_TICKETING_ENABLED="false",
+        )
     )
     assert config.is_live_readonly() is True
     assert config.submission_enabled is False
+    assert config.candidate_generation_enabled is False
+    assert config.order_ticketing_enabled is False
 
 
 # --- fail closed: missing safety-critical flags have no benign default -------
