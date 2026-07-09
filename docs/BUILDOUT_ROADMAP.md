@@ -12,17 +12,61 @@ to trade.
 
 ## Current Repo State
 
-- PR #1, `gateway-pretrade-v1.3-ct-derivation`, is merged into `main` with merge
-  commit `20b8bdf`.
-- PR #2, `order-ticket-routing-v1`, is merged into `main` with merge commit
-  `72936b5ccee8a6cd91494512ded88155a7fa7e10`.
-- Phase 0 is tagged as `gateway-order-ticket-v1.0`.
-- Current branch is `main`, tracking `origin/main`.
-- Current validation target for landed Phase 0 is `197 passed`.
-- Root `CONSTITUTION.md` and `SYSTEM_ARCHITECTURE.md` already exist and remain
-  canonical. Future docs should summarize and link to them, not fork their law.
-- Missing hardening still includes `pyproject.toml`, lint config, Pyright config,
-  pytest markers, GitHub Actions CI, and branch protection.
+Snapshot date: 2026-07-08. Earlier revisions of this section described the
+repo as of Phase 0 (`197 passed`); that state is long superseded.
+
+- Phases 0-14 are implemented and merged to `main`, each with rejection-first
+  tests. Phase 15 has landed as checklist, runbook, and live-readonly config
+  scaffolding (`tests/test_live_readonly_v1.py`) — not as live deployment.
+- Current local validation: `696 passed` (full suite, 2026-07-08).
+- Root `CONSTITUTION.md` and `SYSTEM_ARCHITECTURE.md` remain canonical. Future
+  docs should summarize and link to them, not fork their law.
+- Hardening from Phase 1 is in place: `pyproject.toml` with Ruff, Pyright, and
+  pytest markers (`unit`, `integration`, `broker`, `paper`, `slow`), plus a
+  `dev` dependency group. GitHub Actions CI and branch protection remain
+  unconfirmed in-repo and should be treated as open Phase 1 items.
+- Beyond the original phase list, an Agent OS read-only relay landed
+  (`ops/api.py`, `tests/test_agent_os_relay_v1.py`, `relay` extra in
+  `pyproject.toml`): a GET-only, sanitized read-model surface consumed by the
+  Agent OS Command Center.
+
+Per-phase status:
+
+| Phase | Landed evidence | Open gap |
+|-------|-----------------|----------|
+| 0 gateway + ticketing | merged; tag `gateway-order-ticket-v1.0` | — |
+| 1 hardening | `pyproject.toml`, Ruff, Pyright, markers | CI, branch protection |
+| 2 broker submit intent | `tests/test_broker_submission_v1.py` | — |
+| 3 fake broker | `tests/test_fake_broker_adapter_v1.py` | — |
+| 4 audit store | `tests/test_audit_store_v1.py` | — |
+| 5 reconciliation | `tests/test_position_reconciliation_v1.py` | — |
+| 6 market data | `tests/test_market_data_adapters_v1.py` | live feed not certified (Constitution §11) |
+| 7 strategies | `tests/test_strategy_candidates_v1.py` | — |
+| 8 replay | `tests/test_replay_runner_v1.py` | — |
+| 9 paper broker eval | `docs/BROKER_CAPABILITY_REPORT.md` (DRAFT); `LocalPaperBroker` + paper config tests | broker selection DEFERRED (non-binding IBKR lean); no real-venue adapter |
+| 10 control plane | `ops/`, `tests/test_control_plane_v1.py` | — |
+| 11 VM shadow | `services/` shadow cycle, `infra/` Compose scaffolding; **deployed** via systemd on the Hostinger VPS (observed 2026-07-06) | formal 5-market-day evidence window not yet recorded |
+| 12 VM paper | `infra/docker-compose.vm_paper.yml`, `docs/PHASE_12_PAPER_TRADING_RUNBOOK.md`, paper cycle tests | blocked on Phase 9 broker selection; evidence window not started |
+| 13 daily reporting | `tests/test_daily_reporting_v1.py` (PR #20, merged 2026-06-22) | — |
+| 14 agent layer | `agents/`, `tests/test_agent_layer_readonly_v1.py`, `agents` extra | no live World A agent service deployed |
+| 15 live-readonly | runbook, `docs/LIVE_MONEY_READINESS_CHECKLIST.md`, config tests | checklist not executed; no live-readonly deployment |
+
+Deployment reality (ratified 2026-07-08): the current shadow/World A host is
+the **Hostinger VPS**, running the Agent OS Command Center, the read-only
+relay, and the Hermes shadow cycle as **systemd units** (not Docker Compose).
+That deployment is codified in the `agent-os-command-center` repo
+(`docs/deploy/HERMES_VPS_SHADOW_RELAY_RUNBOOK.md`,
+`docs/deploy/COMMAND_CENTER_VPS_DEPLOYMENT.md`), which is the source of truth
+for the live host shape. The in-repo `infra/` Compose stack remains the
+provider-neutral deployment artifact for **future clean World B (paper) and
+World C (live) hosts**, for which DigitalOcean droplets remain earmarked per
+`docs/DIGITALOCEAN_SETUP_GUIDE_FOR_GEMINI.md` — separate boxes with no AI
+build tooling and no shared secrets.
+
+Still not operational (see Operational Acceptance Criteria at the end of this
+document): live World A agent service connected to Agent OS, formally recorded
+World B shadow evidence, live host-health producer, real paper broker
+selection/adapter, and the paper trading evidence window.
 
 ## Coordination Model
 
@@ -425,10 +469,19 @@ Purpose:
 
 Deployment:
 
-- Provider-neutral target. The current preferred provider is DigitalOcean; earlier
-  Hostinger references are not architectural requirements.
-- Docker Compose only in v1.
-- Services: `hermes-app`, `hermes-worker`, `hermes-reporter`, `hermes-db`.
+- Implemented shape (ratified 2026-07-08): systemd units on the Hostinger VPS,
+  shared with the Agent OS Command Center and the read-only relay. See
+  `agent-os-command-center/docs/deploy/HERMES_VPS_SHADOW_RELAY_RUNBOOK.md` for
+  the codified live inventory (that repo is the source of truth for the live
+  host shape).
+- The `infra/` Docker Compose stack is the provider-neutral artifact retained
+  for future clean World B (paper) / World C (live) hosts; DigitalOcean droplets
+  remain earmarked for those per
+  `docs/DIGITALOCEAN_SETUP_GUIDE_FOR_GEMINI.md`. Compose is not required for the
+  current shadow host, and earlier Hostinger-vs-provider wording is not an
+  architectural requirement.
+- Compose-stack services: `hermes-app`, `hermes-worker`, `hermes-reporter`,
+  `hermes-db`.
 - Use mounted SQLite volume for shadow mode if write volume stays low.
 - Non-root deploy user, SSH keys only, password SSH disabled, firewall, git,
   Docker, Compose, log rotation, backup script, health check, heartbeat file/log.
@@ -586,3 +639,74 @@ Live-readonly config only:
 
 Live tiny-submit remains a future explicit decision after paper has a boring,
 clean record.
+
+## Operational Acceptance Criteria
+
+Added 2026-07-08. Per-phase exit criteria above define when a phase's code is
+done. This section defines when a surface is **operational** — running
+unattended on the intended host with recorded evidence. Four tiers, promoted
+strictly in order.
+
+### Tier 1: Read-only shadow dashboard (World A surface)
+
+Operational when all of the following hold:
+
+- The four systemd units on the shadow host (`agent-os-web`,
+  `hermes-agent-os-relay`, `hermes-shadow-cycle.service/.timer`) run healthy
+  for 5 consecutive market days: timer fires on schedule, shadow cycle exits
+  `0/SUCCESS`, heartbeat stays fresh, relay serves GET-only read models.
+- The Agent OS dashboard renders live relay data (not mock fixtures) for
+  Mission Control, Environments, and Human Gate surfaces.
+- The host-health producer (Agent OS P13 design) is implemented and feeding
+  the Environments overlay from live unit state.
+- No mutation path exists from dashboard or relay to the Hermes runtime
+  (relay rejection tests green; network boundary per
+  `HOSTINGER_WORLD_A_ACTIVATION.md` §6 verified).
+- Evidence recorded: daily audit JSONL exports plus unit status captures in
+  the handoff directory for the full window.
+
+### Tier 2: World A agent layer (live)
+
+Operational when:
+
+- The Phase 14 agent service runs as its own non-root unit in World A with the
+  `agents` extra installed; no broker credentials, no LLM keys in any
+  deterministic runtime process; `forbidden_tools` denial active in deployed
+  mode (no `Bash`/`Edit`/`Write`, no filesystem write path).
+- It produces OpsSummary / RiskNarrative outputs derived from real audit and
+  report records for 5 consecutive market days.
+- Prompt-injection and forbidden-request rejections are demonstrated against
+  the deployed configuration, not only in unit tests.
+- Any `CandidateTradeIntent` it proposes reaches the Gateway only through
+  strict typed parsing, and Gateway approval/rejection appears in the audit
+  store.
+
+### Tier 3: VM paper trading (World B)
+
+Operational when:
+
+- A real paper broker is selected through the verification gates in
+  `docs/BROKER_CAPABILITY_REPORT.md` (selection currently DEFERRED), and its
+  adapter lands via a reviewed phase PR.
+- The paper runtime runs on its own clean host (DigitalOcean droplet
+  earmarked) with no AI build tooling and no shared secrets, per
+  `docs/DIGITALOCEAN_SETUP_GUIDE_FOR_GEMINI.md`.
+- Phase 12 stages P0-P4 are passed in order, and the Phase 12 exit criteria
+  are met in full: 20 market days of paper evidence with zero unexplained
+  submits/duplicates/missing reports/unreconciled positions, and all drill
+  counts (10 cancel/replace, 5 partial-fill, 5 disconnect, 5 restart-recovery).
+
+### Tier 4: Live-readonly
+
+Operational when:
+
+- The applicable items of `docs/LIVE_MONEY_READINESS_CHECKLIST.md` are
+  executed and recorded, and the Phase 15 runbook is followed on a clean
+  World C candidate host.
+- `BROKER_MODE=live_readonly`, `SUBMISSION_ENABLED=false`,
+  `LIVE_SUBMIT_ENABLED=false` verified in the deployed config.
+- Reconciliation runs against real account data for 5 consecutive market days
+  with no mismatch, and daily reports generate cleanly.
+
+Live tiny-submit remains outside this document: a future explicit human
+decision after Tier 3 and Tier 4 have boring, clean records.
