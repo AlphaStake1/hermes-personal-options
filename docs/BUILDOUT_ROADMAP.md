@@ -12,19 +12,20 @@ to trade.
 
 ## Current Repo State
 
-Snapshot date: 2026-07-08. Earlier revisions of this section described the
+Snapshot date: 2026-07-09. Earlier revisions of this section described the
 repo as of Phase 0 (`197 passed`); that state is long superseded.
 
 - Phases 0-14 are implemented and merged to `main`, each with rejection-first
   tests. Phase 15 has landed as checklist, runbook, and live-readonly config
   scaffolding (`tests/test_live_readonly_v1.py`) — not as live deployment.
-- Current local validation: `696 passed` (full suite, 2026-07-08).
+- Current local validation: `696 passed` (full suite, 2026-07-09).
 - Root `CONSTITUTION.md` and `SYSTEM_ARCHITECTURE.md` remain canonical. Future
   docs should summarize and link to them, not fork their law.
 - Hardening from Phase 1 is in place: `pyproject.toml` with Ruff, Pyright, and
   pytest markers (`unit`, `integration`, `broker`, `paper`, `slow`), plus a
-  `dev` dependency group. GitHub Actions CI and branch protection remain
-  unconfirmed in-repo and should be treated as open Phase 1 items.
+  `dev` dependency group. GitHub Actions CI (`.github/workflows/ci.yml`) runs
+  tests, Ruff, and Pyright; remote `main` branch protection is enabled with the
+  strict required status check `Tests, Ruff, Pyright` (verified 2026-07-09).
 - Beyond the original phase list, an Agent OS read-only relay landed
   (`ops/api.py`, `tests/test_agent_os_relay_v1.py`, `relay` extra in
   `pyproject.toml`): a GET-only, sanitized read-model surface consumed by the
@@ -35,7 +36,7 @@ Per-phase status:
 | Phase | Landed evidence | Open gap |
 |-------|-----------------|----------|
 | 0 gateway + ticketing | merged; tag `gateway-order-ticket-v1.0` | — |
-| 1 hardening | `pyproject.toml`, Ruff, Pyright, markers | CI, branch protection |
+| 1 hardening | `pyproject.toml`, Ruff, Pyright, markers, CI workflow, protected `main` with required status check | — |
 | 2 broker submit intent | `tests/test_broker_submission_v1.py` | — |
 | 3 fake broker | `tests/test_fake_broker_adapter_v1.py` | — |
 | 4 audit store | `tests/test_audit_store_v1.py` | — |
