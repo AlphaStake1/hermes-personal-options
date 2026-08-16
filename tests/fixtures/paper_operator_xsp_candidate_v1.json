@@ -1,0 +1,22 @@
+{
+  "underlying": "XSP",
+  "direction": "PUT_CREDIT",
+  "short_leg": {
+    "side": "SHORT",
+    "option_type": "PUT",
+    "strike": "495",
+    "delta": "-0.08",
+    "contracts": 1
+  },
+  "long_leg": {
+    "side": "LONG",
+    "option_type": "PUT",
+    "strike": "490",
+    "delta": "-0.05",
+    "contracts": 1
+  },
+  "net_credit": "0.50",
+  "multiplier": 100,
+  "dte": 2,
+  "rationale_id": "paper-operator-local-fixture-v1"
+}

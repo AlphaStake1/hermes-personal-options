@@ -120,3 +120,65 @@ commit a populated env file. No broker credentials belong on a paper droplet in 
 Codex review does not authorize merge, phase advancement, VM creation, broker
 selection, or submission enablement. Those remain Eric's explicit decisions
 (`CONSTITUTION.md` §14).
+
+## 8. Local paper operator (bounded MVP, `ops/paper_operator.py`)
+
+> Local-only. Not VM deployment, not phase advancement, not a real broker sandbox,
+> and never live authority. `python -m ops.paper_operator` runs entirely in-process
+> against a local SQLite file — no network, no broker SDK, no credentials, and
+> `SubmitMode.LIVE` cannot be reached from any code path in this module.
+
+This is a deterministic local demonstration/inspection tool that exercises the
+already-existing Phase 9-12 stack (`ExecutionGateway`, `LocalPaperBroker`,
+`services.paper_cycle.run_paper_cycle`, `AuditStore`, and the Phase 10
+`ops.control_plane` verbatim) end to end, without any VM, Compose stack, or
+real/paper broker account. It loads exactly one checked-in, schema-valid XSP
+candidate fixture (`tests/fixtures/paper_operator_xsp_candidate_v1.json`) — data
+only, carrying no price, approval, ticket, or submission authority.
+
+Commands:
+
+```bash
+python -m ops.paper_operator submit --limit-price 0.50 --approved-by <name>
+python -m ops.paper_operator inspect
+python -m ops.paper_operator cancel-drill --limit-price 0.50 --approved-by <name>
+python -m ops.paper_operator recovery
+```
+
+Expected `submit` demonstration:
+
+```text
+candidate fixture -> ExecutionGateway approval -> exact gateway-minted XSP,
+one-contract, LIMIT OrderTicket displayed -> the operator types the EXACT
+order_ticket_hash shown to build a fresh PaperSubmitApproval bound to that one
+BrokerSubmitIntent -> BrokerSubmitIntent persisted (before the broker call) ->
+LocalPaperBroker simulated fill -> ExecutionReport persisted (after the broker
+call) -> audit chain and unresolved-order (reconciliation) state displayed
+```
+
+`inspect` and `recovery` reuse `ops.control_plane.ControlPlane` and
+`AuditStore.unresolved_open_orders()` unmodified against the same local SQLite
+file; they display only what is actually persisted, never fabricated state.
+`cancel-drill` submits one deterministic order that is left open (never
+auto-filled), then cancels it through the existing human-authorized
+`ControlPlane.cancel_open_orders` command — still paper-only, still local.
+
+Fail-closed behavior (each has a rejection-first test in
+`tests/test_paper_operator_v1.py`): a fixture that is not XSP, not exactly one
+contract, not valid JSON, prose, or carries an unknown field is refused before
+it ever reaches the gateway. A non-XSP candidate is rejected by the gateway
+before any ticket is minted. A market-order routing state can never mint a
+ticket. Missing, empty, wrong, duplicated, replayed, or reused (second
+invocation of the same confirmer) confirmations never produce a submit — no
+CLI flag, fixture field, environment value, prose, agent, or LLM can supply the
+`order_ticket_hash` a confirmation must match, because it does not exist until
+the gateway mints it. An over-`PAPER_MAX_CONTRACTS` candidate still has its
+`BrokerSubmitIntent` persisted before the broker call (the required ordering),
+then fails at the broker policy layer and surfaces as an unresolved order for
+manual recovery — it is never silently dropped.
+
+This local operator is a smaller, narrower surface than §1-§7 above: it never
+opens a network connection, never selects or connects to a real broker, and
+does not by itself satisfy the Phase 12 exit criteria (20 market days paper,
+drill counts) or the Phase 9 5-market-day local paper-shadow window. Those
+remain separate, explicitly authorized future operating packets.
