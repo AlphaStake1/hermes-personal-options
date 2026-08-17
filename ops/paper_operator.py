@@ -4,10 +4,16 @@ This is NOT VM deployment, NOT phase advancement, NOT a real broker sandbox, and
 carries NO live trading authority. It is a deterministic local demonstration that
 exercises the already-existing Phase 9-12 stack end to end, entirely in-process:
 
-    checked-in XSP candidate fixture
+    THE ONE checked-in, path/hash-authenticated XSP candidate fixture
+      -> fixed, deterministic offline-replay price/reconciliation evidence
+         (protected Phase 6 boundary: data.fixtures / data.base — never live
+         broker/feed data, never the candidate's own claims)
       -> ExecutionGateway.validate() (deterministic, existing)
-      -> exact gateway-minted OrderTicket displayed
-      -> typed PaperSubmitApproval bound to exactly that BrokerSubmitIntent
+      -> exact gateway-minted, fully priced and timestamped OrderTicket/BrokerSubmitIntent
+         displayed together with a freshly generated, unpredictable per-invocation nonce
+      -> a human types back the EXACT confirmation_code that display shows (never a
+         pre-supplied value) -> typed PaperSubmitApproval bound to that ONE intent's
+         complete content via a required full_intent_digest
       -> services.paper_cycle.run_paper_cycle() with an armed LocalPaperBroker
       -> BrokerSubmitIntent persisted BEFORE the broker call
       -> simulated ExecutionReport persisted AFTER the broker call
@@ -17,11 +23,15 @@ Every protected object (``ValidatedTradeIntent``, ``OrderTicket``, ``BrokerSubmi
 ``ExecutionReport``) is minted only by the existing deterministic gateway/broker code this
 module calls; nothing here mints a protected type directly. ``PaperSubmitApproval`` is
 non-protected by design (``brokers/paper.py``), so this module supplies its own strict
-binding: a human must type the EXACT ``order_ticket_hash`` shown for THIS ONE intent
-before an approval is ever built — no CLI flag, fixture field, environment value, or
-default can supply that value ahead of time, because it does not exist until the gateway
-mints it. Missing, malformed, mismatched, duplicated, replayed, or reused confirmations
-fail closed (see ``PaperOperatorConfirmationError`` / the rejection-first tests).
+binding: a human must type the EXACT ``confirmation_code`` shown for THIS ONE intent
+before an approval is ever built. That code is a SHA-256 mixture of a freshly generated,
+unpredictable nonce and the intent's own complete-content digest, so — unlike a value
+derived only from deterministic ticket content — it cannot be known, guessed, replayed
+from an earlier run, or supplied ahead of time by any CLI flag, fixture field,
+environment value, prose, agent, or LLM. Missing, wrong, captured, autonomous, replayed,
+cross-store, repriced, retimestamped, reused-nonce-alone, duplicated, or reused
+confirmations all fail closed (see ``PaperOperatorConfirmationError`` / the
+rejection-first tests).
 
 ``AppConfig(app_env=AppEnv.VM_PAPER, ...)`` here is a config VALUE only — it is what
 ``services.paper_cycle.require_paper_safe`` demands before it will run at all. Building
@@ -30,10 +40,14 @@ that value in-process does not deploy a VM, open a network port, or touch
 
 CLI:
 
-    python -m ops.paper_operator submit  --limit-price 0.50 --approved-by <name>
+    python -m ops.paper_operator submit  --approved-by <name>
     python -m ops.paper_operator inspect
-    python -m ops.paper_operator cancel-drill --limit-price 0.50 --approved-by <name>
+    python -m ops.paper_operator cancel-drill --approved-by <name>
     python -m ops.paper_operator recovery
+
+The CLI intentionally exposes no confirmation, cancel-confirmation, fixture, or
+limit-price options: the fixture path, the submitted price, and every confirmation are
+authenticated/derived/read fresh internally, never supplied ahead of time by a caller.
 
 See docs/PHASE_12_PAPER_TRADING_RUNBOOK.md for the bounded local-operator section.
 """
@@ -41,8 +55,10 @@ See docs/PHASE_12_PAPER_TRADING_RUNBOOK.md for the bounded local-operator sectio
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import secrets
 import sys
 from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta, timezone
@@ -60,39 +76,30 @@ from brokers import (
     PaperSubmitApproval,
     paper_submit_approval_for_intent,
 )
+from brokers.paper import compute_full_intent_digest
 from config.app_config import AppConfig, AppEnv
+from data.base import MarketDataAdapter, MarketDataUnavailableError, assemble_price_reconciliation
+from data.contract_metadata_adapter import build_contract_metadata
+from data.fixtures import FixtureMarketDataAdapter, make_xsp_fixture
 from gateway import GatewayRequest, OrderRoutingState
 from schemas import (
     AccountState,
     AccountType,
     AllowedUnderlyingPolicy,
-    BrokerDataSnapshot,
     BrokerMode,
     BrokerSubmitIntent,
     CandidateTradeIntent,
-    CertificationStatus,
     ConcentrationSnapshot,
-    ContractMetadata,
     DrawdownHaltState,
     EmergencyState,
-    EventBlackoutCalendar,
     ExecutionQualityState,
-    ExerciseStyle,
-    FeedCoverageStatus,
-    FeedLatencyCheck,
-    FeedProvider,
     Instrument,
-    LiquidityGate,
     MultiLegPlan,
+    OptionType,
     OrderTypePolicy,
     PortfolioHeatCheck,
-    PriceReconciliationCheck,
     ProtectionState,
     RouteMode,
-    SecondaryFeedCertification,
-    SettlementStyle,
-    SpreadContractMetadata,
-    SpreadLeg,
     StrategyStage,
     StrategyStageState,
     Underlying,
@@ -122,6 +129,17 @@ DEFAULT_DB_PATH = os.environ.get(
 # local demo is fully reproducible regardless of when it is actually run.
 DEFAULT_AS_OF = datetime(2026, 6, 17, 17, 30, tzinfo=timezone.utc)
 
+# Pinned SHA-256 of the ONE checked-in candidate fixture (roadmap B003). Production loads
+# only this exact path with this exact content — never a copy, symlink, or edited byte.
+PINNED_FIXTURE_SHA256 = "b98e125726f8add950838b8ce96cdb54a438acabedb9ecedaec4b3a8680064e7"
+
+# The fixed offline-replay evidence (data.fixtures.make_xsp_fixture) is a short-495 /
+# long-490 XSP put credit spread — the same shape as the one checked-in candidate
+# fixture. These identify which fixed evidence entries this operator looks up; they are
+# NOT read from the candidate and carry no price authority themselves.
+_OFFLINE_SHORT_PUT_STRIKE = Decimal("495")
+_OFFLINE_LONG_PUT_STRIKE = Decimal("490")
+
 
 class PaperOperatorError(Exception):
     """Base class for local paper operator failures (fail closed)."""
@@ -135,6 +153,10 @@ class PaperOperatorConfirmationError(PaperOperatorError):
     """A human confirmation failed to bind to the exact displayed BrokerSubmitIntent."""
 
 
+class PaperOperatorPriceError(PaperOperatorError):
+    """A submitted LIMIT price failed to match the authenticated reconciliation evidence."""
+
+
 class PaperOperatorDrillError(PaperOperatorError):
     """A deterministic local drill could not run in the expected shape."""
 
@@ -142,17 +164,49 @@ class PaperOperatorDrillError(PaperOperatorError):
 # --- fixture loading (data only — no price/approval/ticket/submission authority) ---
 
 
-def load_xsp_candidate_fixture(
-    path: str | Path = DEFAULT_FIXTURE_PATH,
-) -> CandidateTradeIntent:
-    """Load and validate the single checked-in local-paper candidate fixture.
+def _authenticate_canonical_fixture_path(path: Path) -> Path:
+    """Fail closed unless ``path`` is exactly the ONE checked-in canonical fixture.
 
-    The fixture is data only: it parses into a ``CandidateTradeIntent`` (not a protected
-    type — strategies already emit this type without authority, per the roadmap Phase 14
-    boundary) and is then re-checked against this operator's own bounded local-paper
-    scope (XSP, exactly one contract) before it is ever handed to the gateway. A fixture
-    that is not a single JSON object, fails schema validation, or falls outside that
-    scope fails closed here — never silently coerced or widened.
+    Production (``load_xsp_candidate_fixture``) always calls this with
+    ``DEFAULT_FIXTURE_PATH`` itself. Requires: the exact canonical resolved location (no
+    copy, no substituted file), a real non-symlink regular file, and pinned SHA-256
+    content. No CLI flag, environment value, or caller path can widen this in production
+    (roadmap B003).
+    """
+    resolved = path.resolve(strict=False)
+    canonical = DEFAULT_FIXTURE_PATH.resolve(strict=False)
+    if resolved != canonical:
+        raise PaperOperatorFixtureError(
+            f"refusing non-canonical fixture path {path}; only the checked-in "
+            f"{DEFAULT_FIXTURE_PATH} is authorized in production"
+        )
+    if path.is_symlink():
+        raise PaperOperatorFixtureError(
+            f"fixture path {path} must be a real, non-symlink regular file"
+        )
+    if not path.is_file():
+        raise PaperOperatorFixtureError(f"fixture path {path} is not a regular file")
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    if digest != PINNED_FIXTURE_SHA256:
+        raise PaperOperatorFixtureError(
+            f"fixture at {path} does not match the pinned SHA-256 "
+            f"({digest} != {PINNED_FIXTURE_SHA256}); refusing a modified fixture"
+        )
+    return path
+
+
+def _parse_candidate_from_path(path: str | Path) -> CandidateTradeIntent:
+    """Parse and validate one ``CandidateTradeIntent`` from an arbitrary path.
+
+    Private, isolated test-only arbitrary-byte/path parser (roadmap B003): production
+    never calls this with anything but the path already authenticated by
+    ``_authenticate_canonical_fixture_path``. The fixture is data only: it parses into a
+    ``CandidateTradeIntent`` (not a protected type — strategies already emit this type
+    without authority, per the roadmap Phase 14 boundary) and is then re-checked against
+    this operator's own bounded local-paper scope (XSP, exactly one contract) before it
+    is ever handed to the gateway. A fixture that is not a single JSON object, fails
+    schema validation, or falls outside that scope fails closed here — never silently
+    coerced or widened.
     """
     text = Path(path).read_text(encoding="utf-8")
     try:
@@ -184,44 +238,90 @@ def load_xsp_candidate_fixture(
     return candidate
 
 
+def load_xsp_candidate_fixture() -> CandidateTradeIntent:
+    """Load and validate THE single checked-in local-paper candidate fixture.
+
+    No parameter: production loads only the authenticated canonical fixture path (exact
+    resolved location, real non-symlink regular file, pinned SHA-256 content, strict
+    UTF-8 JSON, exact ``CandidateTradeIntent`` validation, XSP only, exactly one
+    contract). No CLI flag, environment value, copied path, substituted file, symlink, or
+    modified byte can select another fixture in production (roadmap B003).
+    """
+    path = _authenticate_canonical_fixture_path(DEFAULT_FIXTURE_PATH)
+    return _parse_candidate_from_path(path)
+
+
 # --- deterministic surrounding safety-state (operator-supplied, not LLM-supplied) ---
 
 
-def _leg_contract(
-    candidate: CandidateTradeIntent, leg: SpreadLeg, expiration: datetime
-) -> ContractMetadata:
-    return ContractMetadata(
-        underlying=candidate.underlying,
-        option_symbol=f"{candidate.underlying.value}{leg.option_type.value[0]}{leg.strike}",
-        expiration_date=expiration,
-        expiration_time=expiration,
-        last_trading_time=expiration,
-        settlement_style=SettlementStyle.CASH,
-        exercise_style=ExerciseStyle.EUROPEAN,
-        multiplier=candidate.multiplier,
-        strike=leg.strike,
-        option_type=leg.option_type,
+def _resolve_expiration(candidate: CandidateTradeIntent, as_of: datetime) -> datetime:
+    return as_of.replace(hour=20, minute=0, second=0, microsecond=0) + timedelta(
+        days=candidate.dte
     )
 
 
+def _offline_replay_adapter(
+    *, as_of: datetime, expiration: datetime
+) -> FixtureMarketDataAdapter:
+    """The ONE fixed, deterministic offline-replay evidence source this operator ever
+    uses in production (roadmap Phase 6, protected ``data.fixtures`` boundary) — never
+    live broker or feed data, and never derived from the candidate's own claims
+    (Constitution §0.1, roadmap B002)."""
+    return FixtureMarketDataAdapter(make_xsp_fixture(as_of=as_of, expiration=expiration))
+
+
+def _offline_leg_symbol(
+    *, option_type: OptionType, strike: Decimal, expiration: datetime
+) -> str:
+    """The exact symbol ``data.fixtures.make_xsp_fixture`` itself builds for this leg —
+    replicated (never invented) so adapter lookups resolve the SAME fixed evidence."""
+    return build_contract_metadata(
+        underlying=Underlying.XSP,
+        strike=strike,
+        option_type=option_type,
+        expiration=expiration,
+    ).option_symbol
+
+
 def build_gateway_request(
-    candidate: CandidateTradeIntent, *, as_of: datetime = DEFAULT_AS_OF
+    candidate: CandidateTradeIntent,
+    *,
+    as_of: datetime = DEFAULT_AS_OF,
+    _market_data_adapter: MarketDataAdapter | None = None,
 ) -> GatewayRequest:
     """Build the full, strict ``GatewayRequest`` for one candidate.
 
-    Only ``candidate`` originates outside deterministic code (fixture data). Every other
-    field here is deterministic operator-supplied safety state, mirroring the canonical
-    approved-request baseline shared by the existing gateway test suite — never an LLM or
-    candidate-authored assertion (Constitution §0.1).
+    ``candidate`` and ``as_of`` are the only public inputs. Every price, liquidity,
+    reconciliation, freshness, and feed-certification fact comes from the fixed,
+    deterministic offline-replay evidence exposed by the protected Phase 6 boundary
+    (``data.fixtures`` / ``data.base``) — never from the candidate's own claims
+    (``net_credit``, strike-as-price, or any other candidate field), a caller/CLI
+    override, an environment value, or an LLM/agent assertion (Constitution §0.1,
+    roadmap B002). Describe this fixed source truthfully: deterministic offline replay,
+    never live broker or feed data.
+
+    ``_market_data_adapter`` is a private, non-public test-only seam for rejection
+    testing (stale/future/uncertified/mismatched/missing evidence); production and the
+    CLI never supply it and it is unreachable from any public production call path.
     """
     if not isinstance(candidate, CandidateTradeIntent):
         raise TypeError(
             "build_gateway_request requires a CandidateTradeIntent; "
             f"got {type(candidate).__name__} — raw dicts and prose are rejected"
         )
-    expiration = as_of.replace(hour=20, minute=0, second=0, microsecond=0) + timedelta(
-        days=candidate.dte
+    expiration = _resolve_expiration(candidate, as_of)
+    adapter: MarketDataAdapter = (
+        _market_data_adapter
+        if _market_data_adapter is not None
+        else _offline_replay_adapter(as_of=as_of, expiration=expiration)
     )
+    short_symbol = _offline_leg_symbol(
+        option_type=OptionType.PUT, strike=_OFFLINE_SHORT_PUT_STRIKE, expiration=expiration
+    )
+    long_symbol = _offline_leg_symbol(
+        option_type=OptionType.PUT, strike=_OFFLINE_LONG_PUT_STRIKE, expiration=expiration
+    )
+    reconciliation = assemble_price_reconciliation(adapter.get_price_inputs(short_symbol))
     return GatewayRequest(
         candidate=candidate,
         as_of=as_of,
@@ -241,10 +341,7 @@ def build_gateway_request(
         ),
         drawdown=DrawdownHaltState(),
         instrument=Instrument(underlying=candidate.underlying),
-        spread_contract=SpreadContractMetadata(
-            short_contract=_leg_contract(candidate, candidate.short_leg, expiration),
-            long_contract=_leg_contract(candidate, candidate.long_leg, expiration),
-        ),
+        spread_contract=adapter.get_spread_metadata(short_symbol, long_symbol),
         underlying_policy=AllowedUnderlyingPolicy(
             xsp_enabled=True,
             spx_phase_2_enabled=False,
@@ -254,26 +351,9 @@ def build_gateway_request(
             effective_at=as_of - timedelta(days=1),
             expires_at=as_of + timedelta(days=30),
         ),
-        data_snapshot=BrokerDataSnapshot(
-            option_quote_ts=as_of - timedelta(milliseconds=200),
-            underlying_price_ts=as_of - timedelta(milliseconds=200),
-            vix_ts=as_of - timedelta(milliseconds=1000),
-            iv_rank_ts=as_of - timedelta(milliseconds=2000),
-            iv_rank_inputs_fresh=True,
-            iv_rank_value=Decimal("85"),
-        ),
-        reconciliation=PriceReconciliationCheck(
-            broker_option_mid=candidate.net_credit,
-            secondary_option_mid=candidate.net_credit + Decimal("0.005"),
-            broker_underlying=candidate.short_leg.strike,
-            secondary_underlying=candidate.short_leg.strike + Decimal("0.10"),
-        ),
-        liquidity=LiquidityGate(
-            bid=candidate.net_credit - Decimal("0.02"),
-            ask=candidate.net_credit + Decimal("0.02"),
-            open_interest=500,
-            top_of_book_size=20,
-        ),
+        data_snapshot=adapter.get_data_snapshot(Underlying.XSP),
+        reconciliation=reconciliation,
+        liquidity=adapter.get_liquidity(short_symbol),
         execution_quality=ExecutionQualityState(
             rolling_avg_slippage_usd=Decimal("0.01"),
             failed_fill_attempts=0,
@@ -290,24 +370,29 @@ def build_gateway_request(
         protection=ProtectionState(long_leg_confirmed=True, broker_native_stop_present=True),
         multi_leg=MultiLegPlan(broker_confirms_atomic_combo=True),
         strategy_stage=StrategyStageState(stage=StrategyStage.LIVE),
-        feed_certification=SecondaryFeedCertification(
-            feed=FeedProvider.POLYGON,
-            status=CertificationStatus.CERTIFIED,
-            certified_at=as_of - timedelta(days=5),
-            coverage=FeedCoverageStatus(
-                covers_xsp=True,
-                covers_spx=candidate.underlying is Underlying.SPX,
-                symbol_mapping_consistent=True,
-            ),
-            latency=FeedLatencyCheck(
-                option_quote_latency_ms=100,
-                underlying_quote_latency_ms=100,
-                option_latency_threshold_ms=500,
-                underlying_latency_threshold_ms=500,
-            ),
-        ),
-        event_calendar=EventBlackoutCalendar(blackouts=()),
+        feed_certification=adapter.get_feed_certification(),
+        event_calendar=adapter.get_event_calendar(),
     )
+
+
+def _resolved_limit_price(
+    request: GatewayRequest, *, _override_for_test: Decimal | None = None
+) -> Decimal:
+    """The one and only executable LIMIT price: the authenticated offline-replay
+    reconciled ``broker_option_mid`` (Constitution §0.1) — never the candidate's
+    ``net_credit``, a CLI flag, or any other caller-supplied value in production.
+
+    ``_override_for_test`` is a private, isolated test-only seam proving a price that
+    disagrees with the reconciliation evidence is refused; production never supplies it.
+    """
+    price = request.reconciliation.broker_option_mid
+    if _override_for_test is not None and _override_for_test != price:
+        raise PaperOperatorPriceError(
+            f"submitted limit_price {_override_for_test} does not match the "
+            f"authenticated reconciled broker_option_mid {price}; refusing a "
+            "mismatched price"
+        )
+    return price
 
 
 def build_routing_state() -> OrderRoutingState:
@@ -397,22 +482,46 @@ def render_ticket_display(intent: BrokerSubmitIntent) -> dict[str, Any]:
     }
 
 
+def _real_clock() -> datetime:
+    return datetime.now(tz=timezone.utc)
+
+
+def _default_nonce_factory() -> str:
+    return secrets.token_hex(16)
+
+
 def make_typed_confirmer(
     *,
     approved_by: str,
-    typed_confirmation: str | None,
-    reader: Callable[[str], str] = input,
-    writer: Callable[[str], None] = print,
+    reader: Callable[[str], str] | None = None,
+    writer: Callable[[str], None] | None = None,
+    clock: Callable[[], datetime] | None = None,
+    nonce_factory: Callable[[], str] | None = None,
 ) -> PaperSubmitConfirmer:
-    """Build a one-shot confirmer bound to exactly one displayed intent.
+    """Build a one-shot confirmer bound to exactly one displayed, fully-priced intent.
 
-    Displays the exact ``BrokerSubmitIntent`` before asking for confirmation. The
-    confirmation must equal ``intent.order_ticket_hash`` — a value that does not exist
-    until the gateway mints it, so no default, CLI flag, fixture field, environment
-    value, prose, agent, or LLM can supply it ahead of time. A missing, malformed, or
-    mismatched value fails closed; the returned callable also refuses a second
-    invocation, so one confirmer authorizes exactly one intent.
+    Displays the complete, exact, priced and timestamped ``BrokerSubmitIntent`` PLUS a
+    freshly generated, unpredictable per-invocation nonce, THEN calls a fresh reader —
+    every single time, unconditionally. There is no pre-supplied confirmation channel:
+    no default, CLI flag, fixture field, environment value, prose, agent, or LLM can
+    supply the required ``confirmation_code`` ahead of time, because it is a SHA-256
+    mixture of THIS invocation's random nonce and the complete intent's own digest —
+    unpredictable even though this fixed local demonstration's underlying deterministic
+    ticket content can otherwise recur across separate runs. A missing, wrong, captured,
+    autonomous, replayed, cross-store, repriced, retimestamped, or reused-nonce-alone
+    answer all fail closed. The returned callable also refuses a second invocation, so
+    one confirmer authorizes exactly one intent (no duplication/reuse).
+
+    ``reader``, ``writer``, ``clock``, and ``nonce_factory`` are internal, non-CLI test
+    seams only (resolved to real ``input`` / ``print`` / UTC-now / a cryptographically
+    random nonce when omitted); the CLI exposes no confirmation, nonce, or clock override
+    of any kind.
     """
+    read = reader if reader is not None else input
+    write = writer if writer is not None else print
+    get_now = clock if clock is not None else _real_clock
+    make_nonce = nonce_factory if nonce_factory is not None else _default_nonce_factory
+
     state = {"used": False}
 
     def _confirm(intent: BrokerSubmitIntent) -> PaperSubmitApproval | None:
@@ -427,22 +536,26 @@ def make_typed_confirmer(
                 "confirmer is required for every additional intent (no replay)"
             )
         state["used"] = True
-        writer(json.dumps(render_ticket_display(intent), indent=2, sort_keys=True))
-        typed = typed_confirmation
-        if typed is None:
-            typed = reader(
-                "type the exact order_ticket_hash shown above to confirm this ONE paper "
-                "submit, or press enter to defer: "
-            )
+        nonce = make_nonce()
+        full_digest = compute_full_intent_digest(intent)
+        confirmation_code = hashlib.sha256(f"{nonce}:{full_digest}".encode()).hexdigest()
+        display = render_ticket_display(intent)
+        display["nonce"] = nonce
+        display["confirmation_code"] = confirmation_code
+        write(json.dumps(display, indent=2, sort_keys=True))
+        typed = read(
+            "type the exact confirmation_code shown above to confirm this ONE paper "
+            "submit, or press enter to defer: "
+        )
         if typed == "":
             return None
-        if typed != intent.order_ticket_hash:
+        if typed != confirmation_code:
             raise PaperOperatorConfirmationError(
-                "typed confirmation did not match the displayed order_ticket_hash; "
+                "typed confirmation did not match the displayed confirmation_code; "
                 "refusing to submit"
             )
         return paper_submit_approval_for_intent(
-            intent, approved_by=approved_by, approved_at=intent.submitted_at
+            intent, approved_by=approved_by, approved_at=get_now()
         )
 
     return _confirm
@@ -495,25 +608,30 @@ def _open_store(db_path: str | Path) -> SqliteAuditStore:
 
 def run_local_paper_submit(
     *,
-    fixture_path: str | Path = DEFAULT_FIXTURE_PATH,
     db_path: str | Path = DEFAULT_DB_PATH,
-    limit_price: Decimal | None,
     approved_by: str,
     as_of: datetime = DEFAULT_AS_OF,
-    typed_confirmation: str | None = None,
-    reader: Callable[[str], str] = input,
-    writer: Callable[[str], None] = print,
+    reader: Callable[[str], str] | None = None,
+    writer: Callable[[str], None] | None = None,
+    clock: Callable[[], datetime] | None = None,
+    nonce_factory: Callable[[], str] | None = None,
     store: AuditStore | None = None,
     broker: LocalPaperBroker | None = None,
+    _market_data_adapter: MarketDataAdapter | None = None,
+    _limit_price_override_for_test: Decimal | None = None,
 ) -> dict[str, Any]:
-    """candidate -> gateway -> ticket shown -> typed confirm -> paper fill -> audit.
+    """canonical fixture -> gateway -> ticket shown -> fresh confirm -> paper fill -> audit.
 
-    ``limit_price`` is the caller's already-validated deterministic LIMIT price (never
-    derived from the candidate's own ``net_credit`` — Constitution §0.1). Passing
-    ``limit_price=None`` deterministically defers the candidate (never submits).
+    The submitted LIMIT price is always the authenticated offline-replay reconciled
+    ``broker_option_mid`` (Constitution §0.1) — there is no caller or CLI price override.
     """
-    candidate = load_xsp_candidate_fixture(fixture_path)
-    request = build_gateway_request(candidate, as_of=as_of)
+    candidate = load_xsp_candidate_fixture()
+    request = build_gateway_request(
+        candidate, as_of=as_of, _market_data_adapter=_market_data_adapter
+    )
+    limit_price = _resolved_limit_price(
+        request, _override_for_test=_limit_price_override_for_test
+    )
     routing_state = build_routing_state()
     config = build_local_paper_app_config()
     owns_store = store is None
@@ -523,9 +641,10 @@ def run_local_paper_submit(
     )
     confirmer = make_typed_confirmer(
         approved_by=approved_by,
-        typed_confirmation=typed_confirmation,
         reader=reader,
         writer=writer,
+        clock=clock,
+        nonce_factory=nonce_factory,
     )
     try:
         cycle = run_paper_cycle(
@@ -551,24 +670,31 @@ def run_local_paper_submit(
 
 def run_cancel_drill(
     *,
-    fixture_path: str | Path = DEFAULT_FIXTURE_PATH,
     db_path: str | Path = DEFAULT_DB_PATH,
-    limit_price: Decimal,
     approved_by: str,
     as_of: datetime = DEFAULT_AS_OF,
-    typed_confirmation: str | None = None,
-    cancel_confirmation: str | None = None,
-    reader: Callable[[str], str] = input,
-    writer: Callable[[str], None] = print,
+    reader: Callable[[str], str] | None = None,
+    writer: Callable[[str], None] | None = None,
+    clock: Callable[[], datetime] | None = None,
+    nonce_factory: Callable[[], str] | None = None,
     store: AuditStore | None = None,
+    _market_data_adapter: MarketDataAdapter | None = None,
+    _limit_price_override_for_test: Decimal | None = None,
 ) -> dict[str, Any]:
     """Deterministic local drill: submit one order that stays WORKING, then cancel it.
 
     Reuses the existing Phase 10 control plane verbatim (``ops.control_plane``) for the
-    cancel step: paper-only, human-authorized, no network, no live broker.
+    cancel step: paper-only, human-authorized through a fresh reader call (never a
+    pre-supplied CLI value), no network, no live broker.
     """
-    candidate = load_xsp_candidate_fixture(fixture_path)
-    request = build_gateway_request(candidate, as_of=as_of)
+    read = reader if reader is not None else input
+    candidate = load_xsp_candidate_fixture()
+    request = build_gateway_request(
+        candidate, as_of=as_of, _market_data_adapter=_market_data_adapter
+    )
+    limit_price = _resolved_limit_price(
+        request, _override_for_test=_limit_price_override_for_test
+    )
     routing_state = build_routing_state()
     config = build_local_paper_app_config()
     owns_store = store is None
@@ -576,9 +702,10 @@ def run_cancel_drill(
     broker = build_cancel_drill_broker(clock=as_of)
     confirmer = make_typed_confirmer(
         approved_by=approved_by,
-        typed_confirmation=typed_confirmation,
-        reader=reader,
+        reader=read,
         writer=writer,
+        clock=clock,
+        nonce_factory=nonce_factory,
     )
     try:
         cycle = run_paper_cycle(
@@ -597,9 +724,7 @@ def run_cancel_drill(
                 f"submit_failed={cycle.submit_failed}"
             )
         plane = ControlPlane(active_store, broker=broker, broker_mode=BrokerMode.PAPER)
-        typed_cancel = cancel_confirmation
-        if typed_cancel is None:
-            typed_cancel = reader("type CANCEL to confirm the paper cancel drill: ")
+        typed_cancel = read("type CANCEL to confirm the paper cancel drill: ")
         auth = confirm_human(command=CMD_CANCEL, typed=typed_cancel, expected="CANCEL")
         report = plane.cancel_open_orders(auth)
         return {
@@ -658,7 +783,9 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             "Local paper operator (Phase 12 P1 replacement MVP). Deterministic, "
             "local-only, paper-simulated. NOT VM deployment, NOT phase advancement, "
-            "NOT a real broker sandbox, and never SubmitMode.LIVE."
+            "NOT a real broker sandbox, and never SubmitMode.LIVE. Always loads the "
+            "one authenticated checked-in candidate fixture and the fixed offline-replay "
+            "price evidence; every confirmation is always read fresh after display."
         ),
     )
     parser.add_argument(
@@ -667,27 +794,14 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     submit = sub.add_parser(
-        "submit", help="candidate -> gateway -> ticket -> typed confirm -> paper fill"
-    )
-    submit.add_argument("--fixture", default=str(DEFAULT_FIXTURE_PATH))
-    submit.add_argument(
-        "--limit-price", required=True, help="operator-validated deterministic LIMIT price"
+        "submit", help="candidate -> gateway -> ticket -> fresh confirm -> paper fill"
     )
     submit.add_argument("--approved-by", required=True)
-    submit.add_argument(
-        "--confirmation",
-        default=None,
-        help="typed order_ticket_hash confirming the displayed intent; omit to be prompted",
-    )
 
     drill = sub.add_parser(
         "cancel-drill", help="deterministic submit-then-cancel drill (paper-only)"
     )
-    drill.add_argument("--fixture", default=str(DEFAULT_FIXTURE_PATH))
-    drill.add_argument("--limit-price", required=True)
     drill.add_argument("--approved-by", required=True)
-    drill.add_argument("--confirmation", default=None)
-    drill.add_argument("--cancel-confirmation", default=None)
 
     sub.add_parser(
         "inspect", help="show status, last decision, audit chain, unresolved orders"
@@ -701,20 +815,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "submit":
             result: dict[str, Any] = run_local_paper_submit(
-                fixture_path=args.fixture,
                 db_path=args.db,
-                limit_price=Decimal(args.limit_price),
                 approved_by=args.approved_by,
-                typed_confirmation=args.confirmation,
             )
         elif args.command == "cancel-drill":
             result = run_cancel_drill(
-                fixture_path=args.fixture,
                 db_path=args.db,
-                limit_price=Decimal(args.limit_price),
                 approved_by=args.approved_by,
-                typed_confirmation=args.confirmation,
-                cancel_confirmation=args.cancel_confirmation,
             )
         elif args.command == "inspect":
             result = run_inspect(db_path=args.db)
@@ -722,7 +829,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = {"unresolved_open_orders": run_recovery_inspection(db_path=args.db)}
         else:  # pragma: no cover - argparse `choices` already constrains this
             raise PaperOperatorError(f"unknown command: {args.command}")
-    except (PaperOperatorError, PaperConfigError, OperatorCommandError) as exc:
+    except (
+        PaperOperatorError,
+        PaperConfigError,
+        OperatorCommandError,
+        MarketDataUnavailableError,
+    ) as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 2
     print(json.dumps(result, indent=2, sort_keys=True, default=str))

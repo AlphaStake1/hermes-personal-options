@@ -31,6 +31,7 @@ from brokers import (
     PaperSubmitApproval,
     paper_submit_approval_for_intent,
 )
+from brokers.paper import compute_full_intent_digest
 from config.app_config import AppConfig, AppEnv
 from schemas import AccountState, AccountType, BrokerSubmitIntent
 from services.paper_cycle import (
@@ -285,12 +286,14 @@ def test_mismatched_confirmation_token_fails_closed(
 ):
     def bad_confirmer(intent: BrokerSubmitIntent) -> PaperSubmitApproval:
         # A token for a different ticket hash: the broker must refuse the match even
-        # though the cycle handed it a token.
+        # though the cycle handed it a token, and even though full_intent_digest
+        # correctly authenticates the complete intent it was actually built from.
         return PaperSubmitApproval(
             order_ticket_hash="0" * 64,
             idempotency_key=intent.idempotency_key,
             approved_by="eric",
             approved_at=intent.submitted_at,
+            full_intent_digest=compute_full_intent_digest(intent),
         )
 
     result = run_paper_cycle(

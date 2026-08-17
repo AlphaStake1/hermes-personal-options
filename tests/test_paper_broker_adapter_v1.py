@@ -19,9 +19,11 @@ from brokers import (
     PaperBrokerConfig,
     PaperPolicyViolationError,
     PaperSubmissionDisabledError,
+    PaperSubmitApproval,
     assert_no_real_broker_payload,
     paper_submit_approval_for_intent,
 )
+from brokers.paper import compute_full_intent_digest
 from gateway import OrderRoutingState, mint_broker_submit_intent, mint_order_ticket
 from replay import ReplayScenario
 from schemas import (
@@ -328,6 +330,74 @@ def test_human_confirmation_time_cannot_precede_intent():
     )
     with pytest.raises(HumanConfirmationRequiredError, match="cannot precede"):
         broker.submit_order(intent, human_confirmation=too_early)
+
+
+def test_paper_submit_approval_requires_full_intent_digest():
+    with pytest.raises(ValueError, match="full_intent_digest"):
+        PaperSubmitApproval(
+            order_ticket_hash="a" * 64,
+            idempotency_key="a" * 64 + ":1",
+            approved_by="human-operator",
+            approved_at=NOW,
+        )
+
+
+@pytest.mark.parametrize(
+    "bad_digest",
+    [
+        pytest.param("0" * 63, id="too-short"),
+        pytest.param("0" * 65, id="too-long"),
+        pytest.param("G" * 64, id="non-hex"),
+        pytest.param("0" * 63 + "F", id="uppercase-hex"),
+    ],
+)
+def test_paper_submit_approval_rejects_malformed_full_intent_digest(bad_digest: str):
+    with pytest.raises(ValueError):
+        PaperSubmitApproval(
+            order_ticket_hash="a" * 64,
+            idempotency_key="a" * 64 + ":1",
+            approved_by="human-operator",
+            approved_at=NOW,
+            full_intent_digest=bad_digest,
+        )
+
+
+def test_human_confirmation_full_intent_digest_must_match_the_complete_intent():
+    intent = _intent()
+    broker = LocalPaperBroker(config=_armed_config())
+    approval = paper_submit_approval_for_intent(
+        intent, approved_by="human-operator", approved_at=NOW + timedelta(seconds=1)
+    )
+    tampered = approval.model_copy(update={"full_intent_digest": "0" * 64})
+    with pytest.raises(HumanConfirmationRequiredError, match="full_intent_digest"):
+        broker.submit_order(intent, human_confirmation=tampered)
+
+
+def test_human_confirmation_digest_computed_from_original_intent_rejects_repriced_replay():
+    """A digest computed for one intent must not authorize a different (repriced)
+    intent that otherwise shares the same order_ticket_hash/idempotency_key shape."""
+    first = _intent()
+    stale_digest = compute_full_intent_digest(first)
+    broker = LocalPaperBroker(config=_armed_config())
+    # A different attempt (different idempotency_key) built from the same ticket, but
+    # carrying the FIRST intent's stale digest — the digest cannot float free of its
+    # own intent's content.
+    different_attempt = mint_broker_submit_intent(
+        first.ticket,
+        attempt_counter=2,
+        submit_mode=SubmitMode.PAPER,
+        limit_price=LIMIT_PRICE,
+        as_of=NOW,
+    )
+    replayed = PaperSubmitApproval(
+        order_ticket_hash=different_attempt.order_ticket_hash,
+        idempotency_key=different_attempt.idempotency_key,
+        approved_by="human-operator",
+        approved_at=NOW + timedelta(seconds=1),
+        full_intent_digest=stale_digest,
+    )
+    with pytest.raises(HumanConfirmationRequiredError, match="full_intent_digest"):
+        broker.submit_order(different_attempt, human_confirmation=replayed)
 
 
 def test_armed_local_paper_submit_fills_through_inner_fake_broker():

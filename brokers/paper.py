@@ -16,6 +16,7 @@ deterministic local paper policy gate in front of it.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from collections.abc import Mapping
 from typing import Any
@@ -153,6 +154,23 @@ class PaperBrokerConfig(HermesModel):
         return self
 
 
+def compute_full_intent_digest(intent: BrokerSubmitIntent) -> str:
+    """Deterministic SHA-256 hex digest of the COMPLETE ``BrokerSubmitIntent``.
+
+    Binds the exact ticket, ``order_ticket_hash``, ``idempotency_key``,
+    ``attempt_counter``, ``submit_mode``, ``submitted_at``, and ``limit_price`` — every
+    field of the frozen intent — so a ``PaperSubmitApproval`` cannot be replayed against
+    a repriced, retimestamped, or otherwise different intent even when its
+    ``order_ticket_hash`` happens to match (Constitution §0.1, §14).
+    """
+    if not isinstance(intent, BrokerSubmitIntent):
+        raise TypeError(
+            "compute_full_intent_digest requires a BrokerSubmitIntent; "
+            f"got {type(intent).__name__}"
+        )
+    return hashlib.sha256(intent.model_dump_json().encode()).hexdigest()
+
+
 class PaperSubmitApproval(HermesModel):
     """Non-protected human confirmation token for local paper drills."""
 
@@ -161,6 +179,7 @@ class PaperSubmitApproval(HermesModel):
     approved_by: str = Field(min_length=1)
     approved_at: AwareDatetime
     submit_mode: SubmitMode = SubmitMode.PAPER
+    full_intent_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def _paper_only(self) -> "PaperSubmitApproval":
@@ -278,6 +297,12 @@ class LocalPaperBroker(BrokerAdapter):
                 "PaperSubmitApproval.approved_at cannot precede intent.submitted_at",
                 reason_code=ReasonCode.HUMAN_REARM_REQUIRED,
             )
+        if human_confirmation.full_intent_digest != compute_full_intent_digest(intent):
+            raise HumanConfirmationRequiredError(
+                "PaperSubmitApproval.full_intent_digest does not match the complete "
+                "submitted BrokerSubmitIntent",
+                reason_code=ReasonCode.HUMAN_REARM_REQUIRED,
+            )
 
 
 def paper_submit_approval_for_intent(
@@ -298,6 +323,7 @@ def paper_submit_approval_for_intent(
         approved_by=approved_by,
         approved_at=approved_at,
         submit_mode=SubmitMode.PAPER,
+        full_intent_digest=compute_full_intent_digest(intent),
     )
 
 

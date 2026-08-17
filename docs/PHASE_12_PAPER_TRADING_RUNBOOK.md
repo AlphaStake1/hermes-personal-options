@@ -132,28 +132,43 @@ This is a deterministic local demonstration/inspection tool that exercises the
 already-existing Phase 9-12 stack (`ExecutionGateway`, `LocalPaperBroker`,
 `services.paper_cycle.run_paper_cycle`, `AuditStore`, and the Phase 10
 `ops.control_plane` verbatim) end to end, without any VM, Compose stack, or
-real/paper broker account. It loads exactly one checked-in, schema-valid XSP
-candidate fixture (`tests/fixtures/paper_operator_xsp_candidate_v1.json`) — data
-only, carrying no price, approval, ticket, or submission authority.
+real/paper broker account. It loads exactly one checked-in, path/hash-authenticated,
+schema-valid XSP candidate fixture (`tests/fixtures/paper_operator_xsp_candidate_v1.json`)
+— data only, carrying no price, approval, ticket, or submission authority. Every price,
+liquidity, reconciliation, freshness, and feed-certification fact used to validate and
+price the submit comes from fixed, deterministic offline-replay evidence exposed by the
+protected Phase 6 boundary (`data.fixtures` / `data.base`) — never from the candidate's
+own claims (its `net_credit`, a strike used as a price, or any other field), a caller or
+CLI override, or an LLM/agent assertion. This is deterministic offline replay, not live
+broker or feed data.
 
 Commands:
 
 ```bash
-python -m ops.paper_operator submit --limit-price 0.50 --approved-by <name>
+python -m ops.paper_operator submit --approved-by <name>
 python -m ops.paper_operator inspect
-python -m ops.paper_operator cancel-drill --limit-price 0.50 --approved-by <name>
+python -m ops.paper_operator cancel-drill --approved-by <name>
 python -m ops.paper_operator recovery
 ```
+
+The CLI intentionally exposes no `--confirmation`, `--cancel-confirmation`,
+`--fixture`, or `--limit-price` option: the fixture path, the submitted LIMIT price,
+and every confirmation are authenticated, derived, or read fresh internally — never
+supplied ahead of time by a caller.
 
 Expected `submit` demonstration:
 
 ```text
-candidate fixture -> ExecutionGateway approval -> exact gateway-minted XSP,
-one-contract, LIMIT OrderTicket displayed -> the operator types the EXACT
-order_ticket_hash shown to build a fresh PaperSubmitApproval bound to that one
-BrokerSubmitIntent -> BrokerSubmitIntent persisted (before the broker call) ->
-LocalPaperBroker simulated fill -> ExecutionReport persisted (after the broker
-call) -> audit chain and unresolved-order (reconciliation) state displayed
+the ONE path/hash-authenticated candidate fixture -> fixed offline-replay price and
+reconciliation evidence -> ExecutionGateway approval -> exact gateway-minted XSP,
+one-contract, LIMIT OrderTicket displayed together with a freshly generated,
+unpredictable per-invocation nonce -> the operator types back the EXACT
+confirmation_code that display shows (a SHA-256 mixture of that nonce and the
+complete intent's own digest) to build a fresh PaperSubmitApproval bound to that one
+BrokerSubmitIntent via a required full_intent_digest -> BrokerSubmitIntent persisted
+(before the broker call) -> LocalPaperBroker simulated fill -> ExecutionReport
+persisted (after the broker call) -> audit chain and unresolved-order
+(reconciliation) state displayed
 ```
 
 `inspect` and `recovery` reuse `ops.control_plane.ControlPlane` and
@@ -161,21 +176,30 @@ call) -> audit chain and unresolved-order (reconciliation) state displayed
 file; they display only what is actually persisted, never fabricated state.
 `cancel-drill` submits one deterministic order that is left open (never
 auto-filled), then cancels it through the existing human-authorized
-`ControlPlane.cancel_open_orders` command — still paper-only, still local.
+`ControlPlane.cancel_open_orders` command (a freshly read `CANCEL` phrase, never
+a pre-supplied flag) — still paper-only, still local.
 
 Fail-closed behavior (each has a rejection-first test in
-`tests/test_paper_operator_v1.py`): a fixture that is not XSP, not exactly one
-contract, not valid JSON, prose, or carries an unknown field is refused before
-it ever reaches the gateway. A non-XSP candidate is rejected by the gateway
-before any ticket is minted. A market-order routing state can never mint a
-ticket. Missing, empty, wrong, duplicated, replayed, or reused (second
-invocation of the same confirmer) confirmations never produce a submit — no
-CLI flag, fixture field, environment value, prose, agent, or LLM can supply the
-`order_ticket_hash` a confirmation must match, because it does not exist until
-the gateway mints it. An over-`PAPER_MAX_CONTRACTS` candidate still has its
-`BrokerSubmitIntent` persisted before the broker call (the required ordering),
-then fails at the broker policy layer and surfaces as an unresolved order for
-manual recovery — it is never silently dropped.
+`tests/test_paper_operator_v1.py`): a fixture that is not the exact canonical
+path, not a real non-symlink regular file, not pinned-SHA-256, not XSP, not
+exactly one contract, not valid JSON, prose, or carries an unknown field is
+refused before it ever reaches the gateway — no CLI flag, environment value,
+copied path, substituted file, symlink, or modified byte can select another
+fixture. A non-XSP candidate is rejected by the gateway before any ticket is
+minted. A market-order routing state can never mint a ticket. Missing, wrong,
+captured, autonomous, replayed, cross-store, repriced, retimestamped,
+reused-nonce-alone, duplicated, or reused confirmations never produce a submit —
+no CLI flag, fixture field, environment value, prose, agent, or LLM can supply
+the `confirmation_code` a confirmation must match, because it is a fresh,
+per-invocation random mixture that does not exist until the gateway mints the
+intent and the confirmer runs. Missing, stale, future, uncertified,
+reconciliation-mismatched, or submitted-price-mismatched price evidence is
+refused before any ticket is minted or any price is submitted; the candidate's
+own `net_credit` carries no executable price authority. An
+over-`PAPER_MAX_CONTRACTS` candidate still has its `BrokerSubmitIntent` persisted
+before the broker call (the required ordering), then fails at the broker policy
+layer and surfaces as an unresolved order for manual recovery — it is never
+silently dropped.
 
 This local operator is a smaller, narrower surface than §1-§7 above: it never
 opens a network connection, never selects or connects to a real broker, and
