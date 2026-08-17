@@ -60,7 +60,7 @@ import json
 import os
 import secrets
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -151,10 +151,6 @@ class PaperOperatorFixtureError(PaperOperatorError):
 
 class PaperOperatorConfirmationError(PaperOperatorError):
     """A human confirmation failed to bind to the exact displayed BrokerSubmitIntent."""
-
-
-class PaperOperatorPriceError(PaperOperatorError):
-    """A submitted LIMIT price failed to match the authenticated reconciliation evidence."""
 
 
 class PaperOperatorDrillError(PaperOperatorError):
@@ -287,22 +283,24 @@ def build_gateway_request(
     candidate: CandidateTradeIntent,
     *,
     as_of: datetime = DEFAULT_AS_OF,
-    _market_data_adapter: MarketDataAdapter | None = None,
 ) -> GatewayRequest:
     """Build the full, strict ``GatewayRequest`` for one candidate.
 
-    ``candidate`` and ``as_of`` are the only public inputs. Every price, liquidity,
+    ``candidate`` and ``as_of`` are the only inputs. Every price, liquidity,
     reconciliation, freshness, and feed-certification fact comes from the fixed,
     deterministic offline-replay evidence exposed by the protected Phase 6 boundary
-    (``data.fixtures`` / ``data.base``) — never from the candidate's own claims
+    (``data.fixtures`` / ``data.base``), resolved internally through
+    ``_offline_replay_adapter`` — never from the candidate's own claims
     (``net_credit``, strike-as-price, or any other candidate field), a caller/CLI
     override, an environment value, or an LLM/agent assertion (Constitution §0.1,
     roadmap B002). Describe this fixed source truthfully: deterministic offline replay,
     never live broker or feed data.
 
-    ``_market_data_adapter`` is a private, non-public test-only seam for rejection
-    testing (stale/future/uncertified/mismatched/missing evidence); production and the
-    CLI never supply it and it is unreachable from any public production call path.
+    There is no adapter-override parameter of any kind: production and the CLI always
+    resolve ``_offline_replay_adapter`` internally. Rejection tests for stale, future,
+    uncertified, mismatched, or missing evidence monkeypatch that internal factory
+    function directly rather than passing a caller-suppliable adapter through this
+    signature.
     """
     if not isinstance(candidate, CandidateTradeIntent):
         raise TypeError(
@@ -310,11 +308,7 @@ def build_gateway_request(
             f"got {type(candidate).__name__} — raw dicts and prose are rejected"
         )
     expiration = _resolve_expiration(candidate, as_of)
-    adapter: MarketDataAdapter = (
-        _market_data_adapter
-        if _market_data_adapter is not None
-        else _offline_replay_adapter(as_of=as_of, expiration=expiration)
-    )
+    adapter: MarketDataAdapter = _offline_replay_adapter(as_of=as_of, expiration=expiration)
     short_symbol = _offline_leg_symbol(
         option_type=OptionType.PUT, strike=_OFFLINE_SHORT_PUT_STRIKE, expiration=expiration
     )
@@ -375,24 +369,16 @@ def build_gateway_request(
     )
 
 
-def _resolved_limit_price(
-    request: GatewayRequest, *, _override_for_test: Decimal | None = None
-) -> Decimal:
+def _resolved_limit_price(request: GatewayRequest) -> Decimal:
     """The one and only executable LIMIT price: the authenticated offline-replay
     reconciled ``broker_option_mid`` (Constitution §0.1) — never the candidate's
-    ``net_credit``, a CLI flag, or any other caller-supplied value in production.
+    ``net_credit``, a CLI flag, or any other caller-supplied value.
 
-    ``_override_for_test`` is a private, isolated test-only seam proving a price that
-    disagrees with the reconciliation evidence is refused; production never supplies it.
+    There is no override parameter of any kind: this function derives the price only
+    from ``request.reconciliation``, so no caller or CLI can ever submit a price that
+    diverges from the authenticated reconciliation evidence.
     """
-    price = request.reconciliation.broker_option_mid
-    if _override_for_test is not None and _override_for_test != price:
-        raise PaperOperatorPriceError(
-            f"submitted limit_price {_override_for_test} does not match the "
-            f"authenticated reconciled broker_option_mid {price}; refusing a "
-            "mismatched price"
-        )
-    return price
+    return request.reconciliation.broker_option_mid
 
 
 def build_routing_state() -> OrderRoutingState:
@@ -490,18 +476,11 @@ def _default_nonce_factory() -> str:
     return secrets.token_hex(16)
 
 
-def make_typed_confirmer(
-    *,
-    approved_by: str,
-    reader: Callable[[str], str] | None = None,
-    writer: Callable[[str], None] | None = None,
-    clock: Callable[[], datetime] | None = None,
-    nonce_factory: Callable[[], str] | None = None,
-) -> PaperSubmitConfirmer:
+def make_typed_confirmer(*, approved_by: str) -> PaperSubmitConfirmer:
     """Build a one-shot confirmer bound to exactly one displayed, fully-priced intent.
 
     Displays the complete, exact, priced and timestamped ``BrokerSubmitIntent`` PLUS a
-    freshly generated, unpredictable per-invocation nonce, THEN calls a fresh reader —
+    freshly generated, unpredictable per-invocation nonce, THEN reads a fresh answer —
     every single time, unconditionally. There is no pre-supplied confirmation channel:
     no default, CLI flag, fixture field, environment value, prose, agent, or LLM can
     supply the required ``confirmation_code`` ahead of time, because it is a SHA-256
@@ -512,16 +491,12 @@ def make_typed_confirmer(
     answer all fail closed. The returned callable also refuses a second invocation, so
     one confirmer authorizes exactly one intent (no duplication/reuse).
 
-    ``reader``, ``writer``, ``clock``, and ``nonce_factory`` are internal, non-CLI test
-    seams only (resolved to real ``input`` / ``print`` / UTC-now / a cryptographically
-    random nonce when omitted); the CLI exposes no confirmation, nonce, or clock override
-    of any kind.
+    There is no ``reader``, ``writer``, ``clock``, or ``nonce_factory`` parameter of any
+    kind: this function always resolves the real ``input``/``print`` builtins, the real
+    ``_real_clock``, and the real ``_default_nonce_factory`` internally. Tests isolate
+    behavior only by monkeypatching those internal names directly (or the ``builtins``
+    module), never by passing a caller-suppliable dependency through this signature.
     """
-    read = reader if reader is not None else input
-    write = writer if writer is not None else print
-    get_now = clock if clock is not None else _real_clock
-    make_nonce = nonce_factory if nonce_factory is not None else _default_nonce_factory
-
     state = {"used": False}
 
     def _confirm(intent: BrokerSubmitIntent) -> PaperSubmitApproval | None:
@@ -536,14 +511,14 @@ def make_typed_confirmer(
                 "confirmer is required for every additional intent (no replay)"
             )
         state["used"] = True
-        nonce = make_nonce()
+        nonce = _default_nonce_factory()
         full_digest = compute_full_intent_digest(intent)
         confirmation_code = hashlib.sha256(f"{nonce}:{full_digest}".encode()).hexdigest()
         display = render_ticket_display(intent)
         display["nonce"] = nonce
         display["confirmation_code"] = confirmation_code
-        write(json.dumps(display, indent=2, sort_keys=True))
-        typed = read(
+        print(json.dumps(display, indent=2, sort_keys=True))
+        typed = input(
             "type the exact confirmation_code shown above to confirm this ONE paper "
             "submit, or press enter to defer: "
         )
@@ -555,7 +530,7 @@ def make_typed_confirmer(
                 "refusing to submit"
             )
         return paper_submit_approval_for_intent(
-            intent, approved_by=approved_by, approved_at=get_now()
+            intent, approved_by=approved_by, approved_at=_real_clock()
         )
 
     return _confirm
@@ -611,27 +586,18 @@ def run_local_paper_submit(
     db_path: str | Path = DEFAULT_DB_PATH,
     approved_by: str,
     as_of: datetime = DEFAULT_AS_OF,
-    reader: Callable[[str], str] | None = None,
-    writer: Callable[[str], None] | None = None,
-    clock: Callable[[], datetime] | None = None,
-    nonce_factory: Callable[[], str] | None = None,
     store: AuditStore | None = None,
     broker: LocalPaperBroker | None = None,
-    _market_data_adapter: MarketDataAdapter | None = None,
-    _limit_price_override_for_test: Decimal | None = None,
 ) -> dict[str, Any]:
     """canonical fixture -> gateway -> ticket shown -> fresh confirm -> paper fill -> audit.
 
     The submitted LIMIT price is always the authenticated offline-replay reconciled
-    ``broker_option_mid`` (Constitution §0.1) — there is no caller or CLI price override.
+    ``broker_option_mid`` (Constitution §0.1) — there is no caller or CLI price,
+    market-data-adapter, reader, writer, clock, or nonce-factory override of any kind.
     """
     candidate = load_xsp_candidate_fixture()
-    request = build_gateway_request(
-        candidate, as_of=as_of, _market_data_adapter=_market_data_adapter
-    )
-    limit_price = _resolved_limit_price(
-        request, _override_for_test=_limit_price_override_for_test
-    )
+    request = build_gateway_request(candidate, as_of=as_of)
+    limit_price = _resolved_limit_price(request)
     routing_state = build_routing_state()
     config = build_local_paper_app_config()
     owns_store = store is None
@@ -639,13 +605,7 @@ def run_local_paper_submit(
     active_broker = (
         broker if broker is not None else build_armed_local_paper_broker(clock=as_of)
     )
-    confirmer = make_typed_confirmer(
-        approved_by=approved_by,
-        reader=reader,
-        writer=writer,
-        clock=clock,
-        nonce_factory=nonce_factory,
-    )
+    confirmer = make_typed_confirmer(approved_by=approved_by)
     try:
         cycle = run_paper_cycle(
             config,
@@ -673,40 +633,25 @@ def run_cancel_drill(
     db_path: str | Path = DEFAULT_DB_PATH,
     approved_by: str,
     as_of: datetime = DEFAULT_AS_OF,
-    reader: Callable[[str], str] | None = None,
-    writer: Callable[[str], None] | None = None,
-    clock: Callable[[], datetime] | None = None,
-    nonce_factory: Callable[[], str] | None = None,
     store: AuditStore | None = None,
-    _market_data_adapter: MarketDataAdapter | None = None,
-    _limit_price_override_for_test: Decimal | None = None,
 ) -> dict[str, Any]:
     """Deterministic local drill: submit one order that stays WORKING, then cancel it.
 
     Reuses the existing Phase 10 control plane verbatim (``ops.control_plane``) for the
-    cancel step: paper-only, human-authorized through a fresh reader call (never a
-    pre-supplied CLI value), no network, no live broker.
+    cancel step: paper-only, human-authorized through a fresh ``input`` read (never a
+    pre-supplied CLI value), no network, no live broker. There is no caller or CLI
+    price, market-data-adapter, reader, writer, clock, or nonce-factory override of any
+    kind.
     """
-    read = reader if reader is not None else input
     candidate = load_xsp_candidate_fixture()
-    request = build_gateway_request(
-        candidate, as_of=as_of, _market_data_adapter=_market_data_adapter
-    )
-    limit_price = _resolved_limit_price(
-        request, _override_for_test=_limit_price_override_for_test
-    )
+    request = build_gateway_request(candidate, as_of=as_of)
+    limit_price = _resolved_limit_price(request)
     routing_state = build_routing_state()
     config = build_local_paper_app_config()
     owns_store = store is None
     active_store: AuditStore = store if store is not None else _open_store(db_path)
     broker = build_cancel_drill_broker(clock=as_of)
-    confirmer = make_typed_confirmer(
-        approved_by=approved_by,
-        reader=read,
-        writer=writer,
-        clock=clock,
-        nonce_factory=nonce_factory,
-    )
+    confirmer = make_typed_confirmer(approved_by=approved_by)
     try:
         cycle = run_paper_cycle(
             config,
@@ -724,7 +669,7 @@ def run_cancel_drill(
                 f"submit_failed={cycle.submit_failed}"
             )
         plane = ControlPlane(active_store, broker=broker, broker_mode=BrokerMode.PAPER)
-        typed_cancel = read("type CANCEL to confirm the paper cancel drill: ")
+        typed_cancel = input("type CANCEL to confirm the paper cancel drill: ")
         auth = confirm_human(command=CMD_CANCEL, typed=typed_cancel, expected="CANCEL")
         report = plane.cancel_open_orders(auth)
         return {

@@ -11,8 +11,7 @@ boundaries):
   3. Every price, liquidity, reconciliation, freshness, and feed-certification fact
      comes from the fixed offline-replay evidence (protected Phase 6 boundary) — never
      the candidate's own claims, a caller/CLI override, or invented data. Missing,
-     stale, future, uncertified, mismatched, or submitted-price-mismatched evidence
-     fails closed.
+     stale, future, uncertified, or mismatched evidence fails closed.
   4. A PaperSubmitApproval can be built only by reading a fresh confirmation_code after
      display — a SHA-256 mixture of a per-invocation random nonce and the complete
      intent's own digest. Missing, wrong, captured, autonomous, replayed, cross-store,
@@ -24,7 +23,14 @@ boundaries):
      never references SubmitMode.LIVE.
   7. No network access occurs anywhere in the local demonstration.
   8. The CLI exposes no confirmation, cancel-confirmation, fixture, or limit-price
-     options.
+     options, and the underlying production entry points (make_typed_confirmer,
+     run_local_paper_submit, run_cancel_drill, build_gateway_request,
+     _resolved_limit_price) expose no reader/writer/clock/nonce-factory or
+     market-data-adapter/price-override parameter of any kind — not merely a CLI
+     omission. Tests isolate behavior only by monkeypatching internal functions
+     (_real_clock, _default_nonce_factory, _offline_replay_adapter) or builtins
+     (input/print), never by passing a caller-suppliable dependency through a
+     public signature.
   9. inspect / cancel-drill / recovery reuse the existing control-plane and audit
      APIs verbatim and report only what is actually persisted.
 """
@@ -61,7 +67,6 @@ from ops.paper_operator import (
     DEFAULT_AS_OF,
     PaperOperatorConfirmationError,
     PaperOperatorFixtureError,
-    PaperOperatorPriceError,
     build_gateway_request,
     build_local_paper_app_config,
     build_routing_state,
@@ -100,34 +105,61 @@ from storage import RecordType, SqliteAuditStore
 APPROVED_BY = "eric"
 LIMIT_PRICE = Decimal("0.50")
 
+# Forbidden production-entry-point parameters closed by HERMES-P12-P1-FIR-B001/B002.
+_FORBIDDEN_CONFIRMATION_PARAMS = ("reader", "writer", "clock", "nonce_factory")
+_FORBIDDEN_PRICE_ADAPTER_PARAMS = (
+    "_market_data_adapter",
+    "_limit_price_override_for_test",
+    "_override_for_test",
+)
+
 
 def _test_clock() -> datetime:
     """A deterministic clock strictly after any ``as_of`` used across these tests."""
     return DEFAULT_AS_OF + timedelta(hours=1)
 
 
-def _capturing_io(*, cancel_phrase: str | None = None):
-    """A (writer, reader, captured) triple that simulates a human who reads exactly
-    the displayed confirmation_code and types it back — only after the display has
-    happened. If ``cancel_phrase`` is given, a SECOND reader() call (the cancel-drill's
-    own follow-up CANCEL prompt) returns it."""
+def _install_confirmation_io(monkeypatch, *, cancel_phrase: str | None = None):
+    """Monkeypatch the real ``builtins.print``/``builtins.input`` the confirmer (and
+    the cancel-drill's own follow-up CANCEL prompt) resolve internally — the only test
+    seam left after B001's reader/writer parameters were removed. Simulates a human who
+    reads exactly the displayed confirmation_code and types it back, only after the
+    display has actually happened. Returns the dict the display is captured into."""
     captured: dict[str, str] = {}
     calls = {"n": 0}
 
-    def writer(line: str) -> None:
-        data = json.loads(line)
-        captured["order_ticket_hash"] = data["order_ticket_hash"]
-        captured["nonce"] = data["nonce"]
-        captured["confirmation_code"] = data["confirmation_code"]
-        captured["limit_price"] = data["limit_price"]
+    def fake_print(*args: object, **_kwargs: object) -> None:
+        if not args or not isinstance(args[0], str):
+            return
+        try:
+            data = json.loads(args[0])
+        except json.JSONDecodeError:
+            return
+        if isinstance(data, dict) and "confirmation_code" in data:
+            captured["order_ticket_hash"] = data["order_ticket_hash"]
+            captured["nonce"] = data["nonce"]
+            captured["confirmation_code"] = data["confirmation_code"]
+            captured["limit_price"] = data["limit_price"]
 
-    def reader(_prompt: str) -> str:
+    def fake_input(_prompt: str = "") -> str:
         calls["n"] += 1
         if calls["n"] == 1:
             return captured["confirmation_code"]
         return cancel_phrase if cancel_phrase is not None else ""
 
-    return writer, reader, captured
+    monkeypatch.setattr("builtins.print", fake_print)
+    monkeypatch.setattr("builtins.input", fake_input)
+    return captured
+
+
+def _patch_offline_replay_adapter(monkeypatch, adapter: FixtureMarketDataAdapter) -> None:
+    """Monkeypatch the internal ``_offline_replay_adapter`` factory directly — the only
+    test seam left after B002's ``_market_data_adapter`` parameter was removed."""
+    monkeypatch.setattr(
+        paper_operator,
+        "_offline_replay_adapter",
+        lambda *, as_of, expiration: adapter,
+    )
 
 
 def _two_contract_candidate() -> CandidateTradeIntent:
@@ -361,10 +393,7 @@ def test_render_ticket_display_rejects_raw_dict():
 
 
 def test_confirmer_rejects_raw_dict_intent():
-    writer, reader, _captured = _capturing_io()
-    confirmer = make_typed_confirmer(
-        approved_by=APPROVED_BY, reader=reader, writer=writer, clock=_test_clock
-    )
+    confirmer = make_typed_confirmer(approved_by=APPROVED_BY)
     with pytest.raises(TypeError):
         confirmer({"order_ticket_hash": "0" * 64})  # type: ignore[arg-type]
 
@@ -416,11 +445,10 @@ def test_full_submit_flow_makes_no_network_calls(monkeypatch, store):
 
     monkeypatch.setattr(socket, "socket", _raise)
     monkeypatch.setattr(socket, "create_connection", _raise)
+    monkeypatch.setattr(paper_operator, "_real_clock", _test_clock)
+    _install_confirmation_io(monkeypatch)
 
-    writer, reader, _captured = _capturing_io()
-    result = run_local_paper_submit(
-        approved_by=APPROVED_BY, reader=reader, writer=writer, clock=_test_clock, store=store,
-    )
+    result = run_local_paper_submit(approved_by=APPROVED_BY, store=store)
     assert result["cycle"]["submitted"] == 1
 
 
@@ -439,15 +467,14 @@ def test_non_xsp_candidate_rejected_by_gateway_never_ticketed():
 # invariant, not "reject before persistence"; the broker call itself must fail.)
 
 
-def test_more_than_one_contract_fails_closed_after_intent_persisted(store):
+def test_more_than_one_contract_fails_closed_after_intent_persisted(store, monkeypatch):
     request = build_gateway_request(_two_contract_candidate())
     routing_state = build_routing_state()
     config = build_local_paper_app_config()
     broker = paper_operator.build_armed_local_paper_broker(clock=DEFAULT_AS_OF)
-    writer, reader, _captured = _capturing_io()
-    confirmer = make_typed_confirmer(
-        approved_by=APPROVED_BY, reader=reader, writer=writer, clock=_test_clock
-    )
+    monkeypatch.setattr(paper_operator, "_real_clock", _test_clock)
+    _install_confirmation_io(monkeypatch)
+    confirmer = make_typed_confirmer(approved_by=APPROVED_BY)
     cycle = run_paper_cycle(
         config, broker, store, recorded_at=DEFAULT_AS_OF,
         requests=[
@@ -468,13 +495,11 @@ def test_more_than_one_contract_fails_closed_after_intent_persisted(store):
 # --- B002: missing price evidence: fails closed before any ticket -----------
 
 
-def test_missing_price_evidence_fails_closed_before_any_ticket(store):
+def test_missing_price_evidence_fails_closed_before_any_ticket(store, monkeypatch):
     adapter = _adapter_with_empty_price_inputs()
+    _patch_offline_replay_adapter(monkeypatch, adapter)
     with pytest.raises(MarketDataUnavailableError):
-        run_local_paper_submit(
-            approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF, store=store,
-            _market_data_adapter=adapter,
-        )
+        run_local_paper_submit(approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF, store=store)
     persisted = {event.record_type for event in store.iter_events()}
     assert RecordType.BROKER_SUBMIT_INTENT not in persisted
 
@@ -482,29 +507,27 @@ def test_missing_price_evidence_fails_closed_before_any_ticket(store):
 # --- B002: stale / future / uncertified / mismatched evidence rejected ------
 
 
-def test_stale_price_evidence_rejected_by_gateway_never_ticketed():
+def test_stale_price_evidence_rejected_by_gateway_never_ticketed(monkeypatch):
     stale = fresh_snapshot(DEFAULT_AS_OF - timedelta(hours=1))
     adapter = _adapter_with_snapshot(DEFAULT_AS_OF, stale)
-    request = build_gateway_request(
-        load_xsp_candidate_fixture(), as_of=DEFAULT_AS_OF, _market_data_adapter=adapter
-    )
+    _patch_offline_replay_adapter(monkeypatch, adapter)
+    request = build_gateway_request(load_xsp_candidate_fixture(), as_of=DEFAULT_AS_OF)
     decision = ExecutionGateway().validate(request)
     assert not decision.is_approved
     assert ReasonCode.PRICE_STALE in decision.reason_codes
 
 
-def test_future_price_evidence_rejected_by_gateway_never_ticketed():
+def test_future_price_evidence_rejected_by_gateway_never_ticketed(monkeypatch):
     future = fresh_snapshot(DEFAULT_AS_OF + timedelta(hours=1))
     adapter = _adapter_with_snapshot(DEFAULT_AS_OF, future)
-    request = build_gateway_request(
-        load_xsp_candidate_fixture(), as_of=DEFAULT_AS_OF, _market_data_adapter=adapter
-    )
+    _patch_offline_replay_adapter(monkeypatch, adapter)
+    request = build_gateway_request(load_xsp_candidate_fixture(), as_of=DEFAULT_AS_OF)
     decision = ExecutionGateway().validate(request)
     assert not decision.is_approved
     assert ReasonCode.DATA_TIMESTAMP_INVALID in decision.reason_codes
 
 
-def test_uncertified_feed_evidence_rejected_by_gateway_never_ticketed():
+def test_uncertified_feed_evidence_rejected_by_gateway_never_ticketed(monkeypatch):
     uncertified = SecondaryFeedCertification(
         feed=FeedProvider.POLYGON,
         status=CertificationStatus.NOT_CERTIFIED,
@@ -518,32 +541,20 @@ def test_uncertified_feed_evidence_rejected_by_gateway_never_ticketed():
         ),
     )
     adapter = _adapter_with_feed_certification(DEFAULT_AS_OF, uncertified)
-    request = build_gateway_request(
-        load_xsp_candidate_fixture(), as_of=DEFAULT_AS_OF, _market_data_adapter=adapter
-    )
+    _patch_offline_replay_adapter(monkeypatch, adapter)
+    request = build_gateway_request(load_xsp_candidate_fixture(), as_of=DEFAULT_AS_OF)
     decision = ExecutionGateway().validate(request)
     assert not decision.is_approved
     assert ReasonCode.SECONDARY_FEED_NOT_CERTIFIED in decision.reason_codes
 
 
-def test_reconciliation_mismatch_evidence_rejected_by_gateway_never_ticketed():
+def test_reconciliation_mismatch_evidence_rejected_by_gateway_never_ticketed(monkeypatch):
     adapter = _adapter_with_mismatched_reconciliation()
-    request = build_gateway_request(
-        load_xsp_candidate_fixture(), as_of=DEFAULT_AS_OF, _market_data_adapter=adapter
-    )
+    _patch_offline_replay_adapter(monkeypatch, adapter)
+    request = build_gateway_request(load_xsp_candidate_fixture(), as_of=DEFAULT_AS_OF)
     decision = ExecutionGateway().validate(request)
     assert not decision.is_approved
     assert ReasonCode.SECONDARY_FEED_MISMATCH in decision.reason_codes
-
-
-def test_submitted_price_mismatch_rejected_before_submission(store):
-    with pytest.raises(PaperOperatorPriceError):
-        run_local_paper_submit(
-            approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF, store=store,
-            _limit_price_override_for_test=Decimal("9.99"),
-        )
-    persisted = {event.record_type for event in store.iter_events()}
-    assert RecordType.BROKER_SUBMIT_INTENT not in persisted
 
 
 def test_candidate_net_credit_has_no_executable_price_authority():
@@ -554,6 +565,28 @@ def test_candidate_net_credit_has_no_executable_price_authority():
     assert inflated.net_credit != request.reconciliation.broker_option_mid
 
 
+# --- B001/B002: no production entry point exposes a caller-controlled -------
+# --- confirmation, clock, nonce, adapter, or price seam ----------------------
+
+
+def test_make_typed_confirmer_exposes_no_reader_writer_clock_nonce_parameters():
+    params = inspect.signature(make_typed_confirmer).parameters
+    for forbidden in _FORBIDDEN_CONFIRMATION_PARAMS:
+        assert forbidden not in params, f"make_typed_confirmer still exposes {forbidden!r}"
+
+
+def test_build_gateway_request_exposes_no_market_data_adapter_parameter():
+    params = inspect.signature(build_gateway_request).parameters
+    for forbidden in _FORBIDDEN_PRICE_ADAPTER_PARAMS:
+        assert forbidden not in params, f"build_gateway_request still exposes {forbidden!r}"
+
+
+def test_resolved_limit_price_exposes_no_override_parameter():
+    params = inspect.signature(paper_operator._resolved_limit_price).parameters
+    for forbidden in _FORBIDDEN_PRICE_ADAPTER_PARAMS:
+        assert forbidden not in params, f"_resolved_limit_price still exposes {forbidden!r}"
+
+
 def test_run_local_paper_submit_and_cancel_drill_expose_no_price_or_fixture_parameters():
     for fn in (run_local_paper_submit, run_cancel_drill):
         params = inspect.signature(fn).parameters
@@ -561,14 +594,14 @@ def test_run_local_paper_submit_and_cancel_drill_expose_no_price_or_fixture_para
         assert "fixture_path" not in params
         assert "typed_confirmation" not in params
         assert "cancel_confirmation" not in params
+        for forbidden in _FORBIDDEN_CONFIRMATION_PARAMS + _FORBIDDEN_PRICE_ADAPTER_PARAMS:
+            assert forbidden not in params, f"{fn.__name__} still exposes {forbidden!r}"
 
 
-def test_submitted_price_flows_from_reconciliation_into_display_and_intent(store):
-    writer, reader, captured = _capturing_io()
-    result = run_local_paper_submit(
-        approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF,
-        reader=reader, writer=writer, clock=_test_clock, store=store,
-    )
+def test_submitted_price_flows_from_reconciliation_into_display_and_intent(store, monkeypatch):
+    monkeypatch.setattr(paper_operator, "_real_clock", _test_clock)
+    captured = _install_confirmation_io(monkeypatch)
+    result = run_local_paper_submit(approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF, store=store)
     assert result["cycle"]["submitted"] == 1
     assert captured["limit_price"] == str(LIMIT_PRICE)
 
@@ -576,11 +609,11 @@ def test_submitted_price_flows_from_reconciliation_into_display_and_intent(store
 # --- missing / declined confirmation: deferred, never submitted --------------
 
 
-def test_declined_confirmation_defers_never_submits(store):
-    result = run_local_paper_submit(
-        approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF,
-        reader=lambda _prompt: "", clock=_test_clock, store=store,
-    )
+def test_declined_confirmation_defers_never_submits(store, monkeypatch):
+    monkeypatch.setattr(paper_operator, "_real_clock", _test_clock)
+    monkeypatch.setattr("builtins.input", lambda *_a, **_k: "")
+    monkeypatch.setattr("builtins.print", lambda *_a, **_k: None)
+    result = run_local_paper_submit(approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF, store=store)
     assert result["cycle"]["submitted"] == 0
     assert result["cycle"]["deferred"] == 1
     persisted = {event["record_type"] for event in result["audit_chain"]}
@@ -590,12 +623,12 @@ def test_declined_confirmation_defers_never_submits(store):
 # --- wrong / malformed confirmation: fails closed, nothing persisted ---------
 
 
-def test_wrong_confirmation_fails_closed_no_submit_persisted(store):
+def test_wrong_confirmation_fails_closed_no_submit_persisted(store, monkeypatch):
+    monkeypatch.setattr(paper_operator, "_real_clock", _test_clock)
+    monkeypatch.setattr("builtins.input", lambda *_a, **_k: "not-the-code")
+    monkeypatch.setattr("builtins.print", lambda *_a, **_k: None)
     with pytest.raises(PaperOperatorConfirmationError):
-        run_local_paper_submit(
-            approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF,
-            reader=lambda _prompt: "not-the-code", clock=_test_clock, store=store,
-        )
+        run_local_paper_submit(approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF, store=store)
     persisted = {event.record_type for event in store.iter_events()}
     assert RecordType.BROKER_SUBMIT_INTENT not in persisted
     assert RecordType.EXECUTION_REPORT not in persisted
@@ -604,102 +637,94 @@ def test_wrong_confirmation_fails_closed_no_submit_persisted(store):
 # --- B001: captured / autonomous / replayed confirmations fail closed -------
 
 
-def test_autonomous_order_ticket_hash_guess_fails_closed(store):
+def test_autonomous_order_ticket_hash_guess_fails_closed(store, monkeypatch):
     _request, intent = _built_intent()
+    monkeypatch.setattr("builtins.input", lambda *_a, **_k: intent.order_ticket_hash)
+    monkeypatch.setattr("builtins.print", lambda *_a, **_k: None)
     with pytest.raises(PaperOperatorConfirmationError):
-        run_local_paper_submit(
-            approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF,
-            reader=lambda _prompt: intent.order_ticket_hash, store=store,
-        )
+        run_local_paper_submit(approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF, store=store)
 
 
-def test_autonomous_correct_full_intent_digest_alone_fails_closed(store):
+def test_autonomous_correct_full_intent_digest_alone_fails_closed(store, monkeypatch):
     """The full_intent_digest is computable OFFLINE (deterministic fixture, fixed
     as_of) without ever running the display — proving it alone is still insufficient
     is the direct fix for the closed vulnerability class."""
     _request, intent = _built_intent()
     offline_digest = compute_full_intent_digest(intent)
+    monkeypatch.setattr("builtins.input", lambda *_a, **_k: offline_digest)
+    monkeypatch.setattr("builtins.print", lambda *_a, **_k: None)
     with pytest.raises(PaperOperatorConfirmationError):
-        run_local_paper_submit(
-            approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF,
-            reader=lambda _prompt: offline_digest, store=store,
-        )
+        run_local_paper_submit(approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF, store=store)
 
 
-def test_reused_raw_nonce_alone_is_insufficient_confirmation(store):
-    writer1, reader1, captured1 = _capturing_io()
-    result1 = run_local_paper_submit(
-        approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF,
-        reader=reader1, writer=writer1, clock=_test_clock, store=store,
-    )
+def test_reused_raw_nonce_alone_is_insufficient_confirmation(store, monkeypatch):
+    monkeypatch.setattr(paper_operator, "_real_clock", _test_clock)
+    captured1 = _install_confirmation_io(monkeypatch)
+    result1 = run_local_paper_submit(approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF, store=store)
     assert result1["cycle"]["submitted"] == 1
     stale_nonce = captured1["nonce"]
 
     other_store = SqliteAuditStore(":memory:")
     try:
+        monkeypatch.setattr("builtins.input", lambda *_a, **_k: stale_nonce)
+        monkeypatch.setattr("builtins.print", lambda *_a, **_k: None)
         with pytest.raises(PaperOperatorConfirmationError):
             run_local_paper_submit(
-                approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF,
-                reader=lambda _prompt: stale_nonce, clock=_test_clock, store=other_store,
+                approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF, store=other_store,
             )
     finally:
         other_store.close()
 
 
-def test_captured_confirmation_fails_against_a_fresh_cross_store_invocation(store):
-    writer1, reader1, captured1 = _capturing_io()
-    run_local_paper_submit(
-        approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF,
-        reader=reader1, writer=writer1, clock=_test_clock, store=store,
-    )
+def test_captured_confirmation_fails_against_a_fresh_cross_store_invocation(store, monkeypatch):
+    monkeypatch.setattr(paper_operator, "_real_clock", _test_clock)
+    captured1 = _install_confirmation_io(monkeypatch)
+    run_local_paper_submit(approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF, store=store)
     stale_code = captured1["confirmation_code"]
 
     other_store = SqliteAuditStore(":memory:")
     try:
+        monkeypatch.setattr("builtins.input", lambda *_a, **_k: stale_code)
+        monkeypatch.setattr("builtins.print", lambda *_a, **_k: None)
         with pytest.raises(PaperOperatorConfirmationError):
             run_local_paper_submit(
-                approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF,
-                reader=lambda _prompt: stale_code, clock=_test_clock, store=other_store,
+                approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF, store=other_store,
             )
     finally:
         other_store.close()
 
 
-def test_captured_confirmation_fails_after_a_repriced_invocation(store):
-    writer1, reader1, captured1 = _capturing_io()
-    run_local_paper_submit(
-        approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF,
-        reader=reader1, writer=writer1, clock=_test_clock, store=store,
-    )
+def test_captured_confirmation_fails_after_a_repriced_invocation(store, monkeypatch):
+    monkeypatch.setattr(paper_operator, "_real_clock", _test_clock)
+    captured1 = _install_confirmation_io(monkeypatch)
+    run_local_paper_submit(approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF, store=store)
     stale_code = captured1["confirmation_code"]
 
     repriced_adapter = _repriced_adapter(as_of=DEFAULT_AS_OF, new_price=Decimal("0.75"))
     other_store = SqliteAuditStore(":memory:")
     try:
+        _patch_offline_replay_adapter(monkeypatch, repriced_adapter)
+        monkeypatch.setattr("builtins.input", lambda *_a, **_k: stale_code)
+        monkeypatch.setattr("builtins.print", lambda *_a, **_k: None)
         with pytest.raises(PaperOperatorConfirmationError):
             run_local_paper_submit(
-                approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF,
-                reader=lambda _prompt: stale_code, clock=_test_clock, store=other_store,
-                _market_data_adapter=repriced_adapter,
+                approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF, store=other_store,
             )
     finally:
         other_store.close()
 
 
-def test_captured_confirmation_fails_after_a_retimestamped_invocation(store):
-    writer1, reader1, captured1 = _capturing_io()
-    run_local_paper_submit(
-        approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF,
-        reader=reader1, writer=writer1, clock=_test_clock, store=store,
-    )
+def test_captured_confirmation_fails_after_a_retimestamped_invocation(store, monkeypatch):
+    monkeypatch.setattr(paper_operator, "_real_clock", _test_clock)
+    captured1 = _install_confirmation_io(monkeypatch)
+    run_local_paper_submit(approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF, store=store)
     stale_code = captured1["confirmation_code"]
 
     later_as_of = DEFAULT_AS_OF + timedelta(minutes=1)
+    monkeypatch.setattr("builtins.input", lambda *_a, **_k: stale_code)
+    monkeypatch.setattr("builtins.print", lambda *_a, **_k: None)
     with pytest.raises(PaperOperatorConfirmationError):
-        run_local_paper_submit(
-            approved_by=APPROVED_BY, as_of=later_as_of,
-            reader=lambda _prompt: stale_code, clock=_test_clock, store=store,
-        )
+        run_local_paper_submit(approved_by=APPROVED_BY, as_of=later_as_of, store=store)
     submit_intents = [
         e for e in store.iter_events() if e.record_type is RecordType.BROKER_SUBMIT_INTENT
     ]
@@ -709,13 +734,12 @@ def test_captured_confirmation_fails_after_a_retimestamped_invocation(store):
 # --- one confirmer authorizes exactly one intent (no reuse/duplication) ------
 
 
-def test_confirmer_refuses_a_second_invocation():
+def test_confirmer_refuses_a_second_invocation(monkeypatch):
     _request, intent1 = _built_intent(attempt_counter=1)
     _request2, intent2 = _built_intent(attempt_counter=2)
-    writer, reader, _captured = _capturing_io()
-    confirmer = make_typed_confirmer(
-        approved_by=APPROVED_BY, reader=reader, writer=writer, clock=_test_clock
-    )
+    monkeypatch.setattr(paper_operator, "_real_clock", _test_clock)
+    _install_confirmation_io(monkeypatch)
+    confirmer = make_typed_confirmer(approved_by=APPROVED_BY)
     approval1 = confirmer(intent1)
     assert approval1 is not None
     with pytest.raises(PaperOperatorConfirmationError, match="already resolved"):
@@ -725,19 +749,14 @@ def test_confirmer_refuses_a_second_invocation():
 # --- duplicate submission: skipped, never double-placed ----------------------
 
 
-def test_duplicate_submission_second_attempt_is_skipped(store):
-    writer1, reader1, _c1 = _capturing_io()
-    result1 = run_local_paper_submit(
-        approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF,
-        reader=reader1, writer=writer1, clock=_test_clock, store=store,
-    )
+def test_duplicate_submission_second_attempt_is_skipped(store, monkeypatch):
+    monkeypatch.setattr(paper_operator, "_real_clock", _test_clock)
+    _install_confirmation_io(monkeypatch)
+    result1 = run_local_paper_submit(approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF, store=store)
     assert result1["cycle"]["submitted"] == 1
 
-    writer2, reader2, _c2 = _capturing_io()
-    result2 = run_local_paper_submit(
-        approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF,
-        reader=reader2, writer=writer2, clock=_test_clock, store=store,
-    )
+    _install_confirmation_io(monkeypatch)
+    result2 = run_local_paper_submit(approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF, store=store)
     assert result2["cycle"]["submitted"] == 0
     assert result2["cycle"]["duplicate_skipped"] == 1
     submit_intents = [
@@ -749,12 +768,10 @@ def test_duplicate_submission_second_attempt_is_skipped(store):
 # --- happy path: full chain, audit, and reconciliation -----------------------
 
 
-def test_happy_path_submit_persists_intent_then_report_and_reconciles(store):
-    writer, reader, captured = _capturing_io()
-    result = run_local_paper_submit(
-        approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF,
-        reader=reader, writer=writer, clock=_test_clock, store=store,
-    )
+def test_happy_path_submit_persists_intent_then_report_and_reconciles(store, monkeypatch):
+    monkeypatch.setattr(paper_operator, "_real_clock", _test_clock)
+    captured = _install_confirmation_io(monkeypatch)
+    result = run_local_paper_submit(approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF, store=store)
     assert result["cycle"]["submitted"] == 1
     assert result["cycle"]["gateway_rejected"] == 0
     assert result["cycle"]["deferred"] == 0
@@ -774,12 +791,10 @@ def test_happy_path_submit_persists_intent_then_report_and_reconciles(store):
 # --- inspect / recovery reuse the existing control-plane + audit APIs -------
 
 
-def test_inspect_reflects_persisted_state_via_existing_control_plane(store):
-    writer, reader, _captured = _capturing_io()
-    run_local_paper_submit(
-        approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF,
-        reader=reader, writer=writer, clock=_test_clock, store=store,
-    )
+def test_inspect_reflects_persisted_state_via_existing_control_plane(store, monkeypatch):
+    monkeypatch.setattr(paper_operator, "_real_clock", _test_clock)
+    _install_confirmation_io(monkeypatch)
+    run_local_paper_submit(approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF, store=store)
     inspected = run_inspect(store=store)
     assert inspected["last_decision"]["found"] is True
     assert inspected["last_decision"]["record_type"] == "ORDER_TICKET"
@@ -787,7 +802,7 @@ def test_inspect_reflects_persisted_state_via_existing_control_plane(store):
     assert any(e["record_type"] == "EXECUTION_REPORT" for e in inspected["audit_chain"])
 
 
-def test_recovery_reports_unresolved_order_after_broker_rejection(store):
+def test_recovery_reports_unresolved_order_after_broker_rejection(store, monkeypatch):
     candidate = load_xsp_candidate_fixture()
     request = build_gateway_request(candidate)
     routing_state = build_routing_state()
@@ -796,10 +811,9 @@ def test_recovery_reports_unresolved_order_after_broker_rejection(store):
         config=PaperBrokerConfig(broker_mode=BrokerMode.PAPER, submission_enabled=True, paper_submit_enabled=True),
         inner=FakeRejectBroker(broker_name="reject", clock=DEFAULT_AS_OF),
     )
-    writer, reader, _captured = _capturing_io()
-    confirmer = make_typed_confirmer(
-        approved_by=APPROVED_BY, reader=reader, writer=writer, clock=_test_clock
-    )
+    monkeypatch.setattr(paper_operator, "_real_clock", _test_clock)
+    _install_confirmation_io(monkeypatch)
+    confirmer = make_typed_confirmer(approved_by=APPROVED_BY)
     cycle = run_paper_cycle(
         config, broker, store, recorded_at=DEFAULT_AS_OF,
         requests=[
@@ -820,23 +834,19 @@ def test_recovery_reports_nothing_fabricated_when_empty(store):
 # --- deterministic cancel drill: paper-only, human-authorized cancel --------
 
 
-def test_cancel_drill_submits_then_cancels_via_existing_control_plane(store):
-    writer, reader, _captured = _capturing_io(cancel_phrase="CANCEL")
-    result = run_cancel_drill(
-        approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF,
-        reader=reader, writer=writer, clock=_test_clock, store=store,
-    )
+def test_cancel_drill_submits_then_cancels_via_existing_control_plane(store, monkeypatch):
+    monkeypatch.setattr(paper_operator, "_real_clock", _test_clock)
+    _install_confirmation_io(monkeypatch, cancel_phrase="CANCEL")
+    result = run_cancel_drill(approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF, store=store)
     assert result["submit_cycle"]["submitted"] == 1
     assert len(result["cancel_report"]["cancelled"]) == 1
 
 
-def test_cancel_drill_wrong_cancel_phrase_fails_closed_leaves_order_open(store):
-    writer, reader, _captured = _capturing_io(cancel_phrase="NOPE")
+def test_cancel_drill_wrong_cancel_phrase_fails_closed_leaves_order_open(store, monkeypatch):
+    monkeypatch.setattr(paper_operator, "_real_clock", _test_clock)
+    _install_confirmation_io(monkeypatch, cancel_phrase="NOPE")
     with pytest.raises(OperatorCommandError):
-        run_cancel_drill(
-            approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF,
-            reader=reader, writer=writer, clock=_test_clock, store=store,
-        )
+        run_cancel_drill(approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF, store=store)
     unresolved = run_recovery_inspection(store=store)
     assert len(unresolved) == 1  # the paper order is left open, not cancelled
 
@@ -846,11 +856,9 @@ def test_cancel_drill_cannot_reach_live_mode_or_network(store, monkeypatch):
         raise AssertionError("network access attempted during cancel drill")
 
     monkeypatch.setattr(socket, "socket", _raise)
-    writer, reader, _captured = _capturing_io(cancel_phrase="CANCEL")
-    result = run_cancel_drill(
-        approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF,
-        reader=reader, writer=writer, clock=_test_clock, store=store,
-    )
+    monkeypatch.setattr(paper_operator, "_real_clock", _test_clock)
+    _install_confirmation_io(monkeypatch, cancel_phrase="CANCEL")
+    result = run_cancel_drill(approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF, store=store)
     assert result["submit_cycle"]["submitted"] == 1
 
 

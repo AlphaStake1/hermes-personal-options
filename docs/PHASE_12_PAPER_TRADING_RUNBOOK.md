@@ -140,7 +140,12 @@ price the submit comes from fixed, deterministic offline-replay evidence exposed
 protected Phase 6 boundary (`data.fixtures` / `data.base`) — never from the candidate's
 own claims (its `net_credit`, a strike used as a price, or any other field), a caller or
 CLI override, or an LLM/agent assertion. This is deterministic offline replay, not live
-broker or feed data.
+broker or feed data. No public or caller-facing production entry point
+(`build_gateway_request`, `_resolved_limit_price`, `run_local_paper_submit`,
+`run_cancel_drill`) accepts a market-data adapter, an executable price, or a
+reconciliation object of any kind — not merely omitted by the CLI, but structurally
+absent from every one of those signatures; production always resolves the internal
+`_offline_replay_adapter` factory itself.
 
 Commands:
 
@@ -154,7 +159,12 @@ python -m ops.paper_operator recovery
 The CLI intentionally exposes no `--confirmation`, `--cancel-confirmation`,
 `--fixture`, or `--limit-price` option: the fixture path, the submitted LIMIT price,
 and every confirmation are authenticated, derived, or read fresh internally — never
-supplied ahead of time by a caller.
+supplied ahead of time by a caller. This is not just a CLI omission: `make_typed_confirmer`,
+`run_local_paper_submit`, and `run_cancel_drill` themselves expose no `reader`, `writer`,
+`clock`, or `nonce_factory` parameter, and always resolve the real `input`/`print`
+builtins plus the real internal clock and nonce factory internally. Any direct Python
+caller of these functions — not only the CLI — gets the same fresh-confirmation
+guarantee; tests isolate behavior only by monkeypatching those internal names.
 
 Expected `submit` demonstration:
 
@@ -192,10 +202,11 @@ reused-nonce-alone, duplicated, or reused confirmations never produce a submit �
 no CLI flag, fixture field, environment value, prose, agent, or LLM can supply
 the `confirmation_code` a confirmation must match, because it is a fresh,
 per-invocation random mixture that does not exist until the gateway mints the
-intent and the confirmer runs. Missing, stale, future, uncertified,
-reconciliation-mismatched, or submitted-price-mismatched price evidence is
-refused before any ticket is minted or any price is submitted; the candidate's
-own `net_credit` carries no executable price authority. An
+intent and the confirmer runs. Missing, stale, future, uncertified, or
+reconciliation-mismatched price evidence is refused before any ticket is minted;
+there is no submitted-price override of any kind on any production entry point, so the
+executable LIMIT price can never diverge from the authenticated reconciliation
+evidence, and the candidate's own `net_credit` carries no executable price authority. An
 over-`PAPER_MAX_CONTRACTS` candidate still has its `BrokerSubmitIntent` persisted
 before the broker call (the required ordering), then fails at the broker policy
 layer and surfaces as an unresolved order for manual recovery — it is never
