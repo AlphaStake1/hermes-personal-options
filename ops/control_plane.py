@@ -5,9 +5,13 @@ operator commands (halt / resume / cancel / flatten + reads); ``ops.commands`` i
 thin argparse wrapper. SYSTEM_ARCHITECTURE / roadmap Phase 10 boundary:
 
   - This is a human operator surface, NOT an execution-authority expansion. It holds no
-    credentials, opens no network, imports no broker SDK, and mints no protected
-    execution object except ``KillSwitchState`` (its own operator switch) through the
-    sanctioned deterministic factory.
+    credentials, opens no network, and imports no broker SDK. The only protected
+    execution objects it mints are ``KillSwitchState`` (its own operator switch) through
+    the sanctioned deterministic factory, and — only on ``cancel-open-orders``, only
+    after the broker confirms a genuine ``CANCELLED`` result for a persisted,
+    provenance-authenticated open order — a terminal ``ExecutionReport`` through the
+    existing gateway ``mint_execution_report`` boundary. Neither path invents a fill,
+    price, or identity of its own.
   - Every command writes exactly one audit event; that audit event is a read command's
     only side effect (handoff: reads are side-effect free except the required audit
     record).
@@ -17,10 +21,19 @@ thin argparse wrapper. SYSTEM_ARCHITECTURE / roadmap Phase 10 boundary:
     cannot fabricate that authorization, so they cannot issue a command.
   - ``flatten-paper-only`` fails closed on any non-PAPER broker mode and never submits a
     closing or live order.
+  - ``cancel-open-orders`` resolves and authenticates the persisted submit identity and
+    latest open ``ExecutionReport`` for every broker-reported open order BEFORE any
+    broker cancellation is attempted; a missing, ambiguous, terminal, corrupt, or
+    mismatched chain refuses the whole command before a single broker call happens,
+    and never fabricates a terminal record for an order it could not authenticate.
+    A later broker or persistence failure mid-batch still refuses the success artifact
+    for the whole command, while any order already genuinely cancelled and durably
+    recorded before that failure keeps its real terminal record.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from contextvars import ContextVar
 from datetime import datetime
@@ -29,10 +42,11 @@ from typing import Any
 from weakref import WeakKeyDictionary
 
 from brokers.base import BrokerAdapter, BrokerFill, BrokerPositionView
-from schemas import AuditArtifact, KillSwitchState
-from schemas.enums import BrokerMode, ReArmMode, ReasonCode
+from gateway import mint_execution_report
+from schemas import AuditArtifact, BrokerSubmitIntent, ExecutionReport, KillSwitchState
+from schemas.enums import BrokerMode, OrderLifecycleState, ReArmMode, ReasonCode, SubmitMode
 from storage.base import AuditStore
-from storage.models import RecordType
+from storage.models import NON_TERMINAL_LIFECYCLE, RecordType, StoredEvent
 
 from .status_report import (
     CancelReport,
@@ -68,9 +82,10 @@ _OPERATOR_REASON_BY_COMMAND: dict[str, ReasonCode] = {
 }
 
 # Gateway-produced decision records, newest of which is "the last decision". These are
-# never emitted by the control plane (which only writes AUDIT_ARTIFACT + KILL_SWITCH_STATE),
-# so a control-plane command audit can never be mistaken for a trade decision. AuditArtifact
-# is deliberately excluded for that reason; surfacing gateway rejections is deferred.
+# never emitted by the control plane (which writes only AUDIT_ARTIFACT, KILL_SWITCH_STATE,
+# and — on an authenticated cancel-open-orders terminal fill — EXECUTION_REPORT), so a
+# control-plane command audit can never be mistaken for a trade decision. AuditArtifact is
+# deliberately excluded for that reason; surfacing gateway rejections is deferred.
 _DECISION_RECORD_TYPES: tuple[RecordType, ...] = (
     RecordType.VALIDATED_TRADE_INTENT,
     RecordType.ORDER_TICKET,
@@ -98,6 +113,13 @@ class OperatorModeError(OperatorCommandError):
 
 class BrokerAdapterUnavailableError(OperatorCommandError):
     """A broker-dependent command was issued with no broker adapter configured."""
+
+
+class OperatorCancelIdentityError(OperatorCommandError):
+    """A broker-reported open order could not be authenticated against the persisted
+    submit chain before cancellation, or the broker's cancel response did not
+    coherently confirm a genuine terminal CANCELLED state for that same
+    authenticated order. Fail closed: nothing is cancelled or minted."""
 
 
 # --- Human authorization (§14) ----------------------------------------------
@@ -426,6 +448,123 @@ class ControlPlane:
         self._store.append(state, created_at=now, recorded_at=now)
         return state
 
+    def _resolve_cancel_identity(self, fill: BrokerFill) -> BrokerSubmitIntent:
+        """Resolve and authenticate the ONE persisted ``BrokerSubmitIntent`` + latest
+        open ``ExecutionReport`` associated with a broker-reported open order, through
+        the store's own provenance-bound APIs (``get_by_idempotency_key`` +
+        ``AuditStore.rehydrate``). Fails closed — before any cancellation — if the
+        chain is missing, ambiguous, terminal, corrupt, or mismatched with what the
+        broker currently reports for this order.
+        """
+        broker_order_id = fill.broker_order_id.value
+        matching_keys: set[str] = set()
+        latest_by_key: dict[str, StoredEvent] = {}
+        for event in self._store.iter_events(record_type=RecordType.EXECUTION_REPORT):
+            payload = json.loads(event.payload_json)
+            if payload.get("broker_order_id") != broker_order_id:
+                continue
+            matching_keys.add(event.record_id)
+            latest_by_key[event.record_id] = event  # iter_events is seq-ascending
+
+        if not matching_keys:
+            raise OperatorCancelIdentityError(
+                f"no persisted ExecutionReport references broker_order_id="
+                f"{broker_order_id!r}; refusing to cancel an unauthenticated order"
+            )
+        if len(matching_keys) > 1:
+            raise OperatorCancelIdentityError(
+                f"ambiguous persisted identity for broker_order_id={broker_order_id!r}: "
+                f"{len(matching_keys)} distinct submit identities reference it"
+            )
+        (logical_key,) = matching_keys
+        latest_report_obj = self._store.rehydrate(latest_by_key[logical_key])
+        if not isinstance(latest_report_obj, ExecutionReport):
+            raise OperatorCancelIdentityError(
+                f"stored record for broker_order_id={broker_order_id!r} did not "
+                "rehydrate to an ExecutionReport"
+            )
+        if latest_report_obj.lifecycle_state not in NON_TERMINAL_LIFECYCLE:
+            raise OperatorCancelIdentityError(
+                f"persisted order for broker_order_id={broker_order_id!r} is already "
+                f"terminal ({latest_report_obj.lifecycle_state}); refusing to cancel"
+            )
+        if (
+            latest_report_obj.broker_order_id != broker_order_id
+            or latest_report_obj.lifecycle_state != fill.lifecycle_state
+            or latest_report_obj.filled_contracts != fill.filled_contracts
+            or latest_report_obj.requested_contracts != fill.requested_contracts
+            or latest_report_obj.avg_fill_price != fill.avg_fill_price
+            or latest_report_obj.fill_timestamp != fill.fill_timestamp
+            or latest_report_obj.submitted_at != fill.submitted_at
+        ):
+            raise OperatorCancelIdentityError(
+                f"broker-reported open order for broker_order_id={broker_order_id!r} "
+                "does not match the persisted latest ExecutionReport; refusing to cancel"
+            )
+
+        submit_event = self._store.get_by_idempotency_key(logical_key)
+        if submit_event is None or submit_event.record_type is not RecordType.BROKER_SUBMIT_INTENT:
+            raise OperatorCancelIdentityError(
+                f"no persisted BrokerSubmitIntent found for idempotency_key="
+                f"{logical_key!r}; refusing to cancel"
+            )
+        intent = self._store.rehydrate(submit_event)
+        if not isinstance(intent, BrokerSubmitIntent):
+            raise OperatorCancelIdentityError(
+                f"stored record for idempotency_key={logical_key!r} did not rehydrate "
+                "to a BrokerSubmitIntent"
+            )
+        if (
+            intent.order_ticket_hash != latest_report_obj.order_ticket_hash
+            or intent.idempotency_key != latest_report_obj.idempotency_key
+            or intent.submitted_at != latest_report_obj.submitted_at
+            or intent.ticket.order_type != latest_report_obj.order_type
+            or intent.ticket.validated_intent.candidate.short_leg.contracts
+            != latest_report_obj.requested_contracts
+            or intent.submit_mode is not SubmitMode.PAPER
+        ):
+            raise OperatorCancelIdentityError(
+                f"persisted BrokerSubmitIntent for idempotency_key={logical_key!r} is "
+                "not coherent with its latest ExecutionReport; refusing to cancel"
+            )
+        return intent
+
+    def _cancel_and_mint_terminal_report(
+        self, fill: BrokerFill, intent: BrokerSubmitIntent, *, now: datetime
+    ) -> BrokerFill:
+        """Cancel one authenticated open order, then mint and durably append the
+        provenance-bound terminal ``ExecutionReport`` — only after the broker confirms
+        a genuine ``CANCELLED`` result coherent with the authenticated intent. Never
+        invents a fill or price: every minted field is read directly off the broker's
+        own cancel response."""
+        assert self._broker is not None  # guarded by the caller
+        cancel_fill = self._broker.cancel_order(fill.broker_order_id)
+        requested_contracts = intent.ticket.validated_intent.candidate.short_leg.contracts
+        if (
+            cancel_fill.broker_order_id != fill.broker_order_id
+            or cancel_fill.lifecycle_state is not OrderLifecycleState.CANCELLED
+            or cancel_fill.requested_contracts != requested_contracts
+            or cancel_fill.submitted_at != intent.submitted_at
+        ):
+            raise OperatorCancelIdentityError(
+                f"broker cancel response for broker_order_id="
+                f"{fill.broker_order_id.value!r} did not coherently confirm a genuine "
+                "CANCELLED terminal state for the authenticated order; refusing to "
+                "persist a terminal ExecutionReport"
+            )
+        report = mint_execution_report(
+            intent,
+            broker_order_id=cancel_fill.broker_order_id,
+            lifecycle_state=cancel_fill.lifecycle_state,
+            filled_contracts=cancel_fill.filled_contracts,
+            avg_fill_price=cancel_fill.avg_fill_price,
+            fill_timestamp=cancel_fill.fill_timestamp,
+            completed_at=cancel_fill.completed_at,
+        )
+        report_created_at = report.completed_at or report.fill_timestamp or report.submitted_at
+        self._store.append(report, created_at=report_created_at, recorded_at=now)
+        return cancel_fill
+
     def cancel_open_orders(self, auth: Any) -> CancelReport:
         now = self._clock()
         self._require_human(auth, CMD_CANCEL, now)
@@ -441,18 +580,30 @@ class ControlPlane:
                 "cancel-open-orders requires a configured broker adapter; refused"
             )
         try:
+            # Resolve and authenticate every open order's persisted identity BEFORE any
+            # broker cancellation is attempted: an unresolvable identity refuses the
+            # whole command before a single broker call is made. A later broker/
+            # persistence failure part-way through an already-authenticated batch still
+            # refuses the success artifact for the whole command (fail closed), but any
+            # order genuinely cancelled and durably recorded before that failure keeps
+            # its real terminal record rather than having it undone or hidden.
+            resolved = tuple(
+                (fill, self._resolve_cancel_identity(fill))
+                for fill in self._broker.get_open_orders()
+            )
             cancelled = tuple(
-                _order_view(self._broker.cancel_order(o.broker_order_id))
-                for o in self._broker.get_open_orders()
+                _order_view(self._cancel_and_mint_terminal_report(fill, intent, now=now))
+                for fill, intent in resolved
             )
         except Exception as exc:
-            # Preserve the command-audit invariant even when the broker raises mid-cancel.
+            # Preserve the command-audit invariant even when identity resolution or the
+            # broker itself fails mid-cancel.
             self._audit(
                 CMD_CANCEL,
                 decision="REJECT",
                 now=now,
                 reason_codes=(ReasonCode.OPERATOR_CANCEL_COMMAND,),
-                detail=f"cancel failed at broker: {type(exc).__name__}: {exc}",
+                detail=f"cancel refused: {type(exc).__name__}: {exc}",
             )
             raise
         self._audit(

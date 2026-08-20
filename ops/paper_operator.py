@@ -641,7 +641,11 @@ def run_cancel_drill(
     cancel step: paper-only, human-authorized through a fresh ``input`` read (never a
     pre-supplied CLI value), no network, no live broker. There is no caller or CLI
     price, market-data-adapter, reader, writer, clock, or nonce-factory override of any
-    kind.
+    kind. ``ControlPlane.cancel_open_orders`` resolves and authenticates the persisted
+    submit identity before cancelling, then mints and durably appends a terminal
+    CANCELLED ``ExecutionReport`` only after the broker confirms the cancellation — the
+    returned ``unresolved_open_orders`` is empty proof the drill's order reached that
+    durable terminal state, never a fabricated claim.
     """
     candidate = load_xsp_candidate_fixture()
     request = build_gateway_request(candidate, as_of=as_of)
@@ -676,6 +680,9 @@ def run_cancel_drill(
             "submit_cycle": _cycle_view(cycle),
             "cancel_report": report.model_dump(mode="json"),
             "audit_chain": render_audit_chain(active_store),
+            "unresolved_open_orders": [
+                u.model_dump(mode="json") for u in active_store.unresolved_open_orders()
+            ],
         }
     finally:
         if owns_store:

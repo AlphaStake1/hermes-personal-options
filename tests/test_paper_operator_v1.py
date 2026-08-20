@@ -33,6 +33,11 @@ boundaries):
      public signature.
   9. inspect / cancel-drill / recovery reuse the existing control-plane and audit
      APIs verbatim and report only what is actually persisted.
+  10. A successful cancel drill persists a durable terminal CANCELLED ExecutionReport
+      (identity-resolved and authenticated, then broker-confirmed) before the success
+      cancel artifact, and restart recovery is clear only once that evidence exists
+      (fixes HERMES-P12-P1-CANCEL-TERMINAL-RECONCILIATION-GAP-001). A broker exception
+      or wrong CANCEL phrase leaves the order unresolved and mints no terminal report.
 """
 
 from __future__ import annotations
@@ -840,6 +845,17 @@ def test_cancel_drill_submits_then_cancels_via_existing_control_plane(store, mon
     result = run_cancel_drill(approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF, store=store)
     assert result["submit_cycle"]["submitted"] == 1
     assert len(result["cancel_report"]["cancelled"]) == 1
+    assert result["cancel_report"]["cancelled"][0]["lifecycle_state"] == "CANCELLED"
+    # a durable terminal CANCELLED ExecutionReport was persisted before the success
+    # artifact — this is what actually clears the order from unresolved recovery.
+    assert result["unresolved_open_orders"] == []
+    record_types = [event["record_type"] for event in result["audit_chain"]]
+    report_indices = [i for i, rt in enumerate(record_types) if rt == "EXECUTION_REPORT"]
+    assert len(report_indices) == 2  # the open WORKING report, then the terminal CANCELLED one
+    cancel_artifact_idx = max(
+        i for i, rt in enumerate(record_types) if rt == "AUDIT_ARTIFACT"
+    )
+    assert report_indices[-1] < cancel_artifact_idx  # terminal report precedes the success artifact
 
 
 def test_cancel_drill_wrong_cancel_phrase_fails_closed_leaves_order_open(store, monkeypatch):
@@ -849,6 +865,64 @@ def test_cancel_drill_wrong_cancel_phrase_fails_closed_leaves_order_open(store, 
         run_cancel_drill(approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF, store=store)
     unresolved = run_recovery_inspection(store=store)
     assert len(unresolved) == 1  # the paper order is left open, not cancelled
+    assert unresolved[0]["latest_lifecycle"] == "WORKING"
+
+
+def test_cancel_drill_broker_exception_leaves_order_open_no_fabricated_report(
+    store, monkeypatch
+):
+    """A broker failure during the cancel call itself must not mint a terminal report
+    or a success artifact; the order remains unresolved for manual recovery."""
+    monkeypatch.setattr(paper_operator, "_real_clock", _test_clock)
+    _install_confirmation_io(monkeypatch, cancel_phrase="CANCEL")
+
+    def _raise(self, order_id):
+        raise RuntimeError("simulated broker outage during cancel")
+
+    monkeypatch.setattr(LocalPaperBroker, "cancel_order", _raise)
+    with pytest.raises(RuntimeError, match="simulated broker outage"):
+        run_cancel_drill(approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF, store=store)
+    unresolved = run_recovery_inspection(store=store)
+    assert len(unresolved) == 1
+    assert unresolved[0]["latest_lifecycle"] == "WORKING"
+    execution_reports = [
+        e for e in store.iter_events() if e.record_type is RecordType.EXECUTION_REPORT
+    ]
+    assert len(execution_reports) == 1  # only the initial WORKING report
+
+
+def test_cancel_drill_restart_recovery_shows_zero_unresolved_after_success(
+    tmp_path, monkeypatch
+):
+    """File-backed close/reopen: a successful cancel drill's zero unresolved orders is
+    durable, not merely an in-memory artifact of the same process/connection."""
+    monkeypatch.setattr(paper_operator, "_real_clock", _test_clock)
+    _install_confirmation_io(monkeypatch, cancel_phrase="CANCEL")
+    db_path = tmp_path / "cancel_drill_success.db"
+
+    result = run_cancel_drill(approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF, db_path=db_path)
+    assert result["submit_cycle"]["submitted"] == 1
+    assert len(result["cancel_report"]["cancelled"]) == 1
+    assert result["unresolved_open_orders"] == []
+
+    # fresh store instance against the same file — genuine restart recovery, not the
+    # same in-process connection the drill happened to use.
+    assert run_recovery_inspection(db_path=db_path) == []
+
+
+def test_cancel_drill_restart_recovery_stays_unresolved_without_cancel(tmp_path, monkeypatch):
+    """Same restart shape, contrast case: without a confirmed cancel, the order stays
+    unresolved across a restart — recovery semantics are unchanged by this fix."""
+    monkeypatch.setattr(paper_operator, "_real_clock", _test_clock)
+    _install_confirmation_io(monkeypatch, cancel_phrase="NOPE")
+    db_path = tmp_path / "cancel_drill_open.db"
+
+    with pytest.raises(OperatorCommandError):
+        run_cancel_drill(approved_by=APPROVED_BY, as_of=DEFAULT_AS_OF, db_path=db_path)
+
+    reopened = run_recovery_inspection(db_path=db_path)
+    assert len(reopened) == 1
+    assert reopened[0]["latest_lifecycle"] == "WORKING"
 
 
 def test_cancel_drill_cannot_reach_live_mode_or_network(store, monkeypatch):

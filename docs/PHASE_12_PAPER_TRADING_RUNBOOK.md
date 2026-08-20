@@ -99,7 +99,18 @@ manually with the Phase 10 control plane:
 - `python -m ops cancel-open-orders` or `flatten-paper-only` (paper-only) to resolve,
   with the required human authorization.
 
-Every control-plane command writes an audit event.
+Every control-plane command writes an audit event. `cancel-open-orders` is what
+actually clears an order from `unresolved_open_orders()`: for each broker-reported
+open order it first resolves and authenticates the persisted submit identity and
+latest open `ExecutionReport` through the store's provenance-bound APIs, fails closed
+before cancelling anything if that chain is missing, ambiguous, terminal, corrupt, or
+mismatched with what the broker currently reports, and only after the broker confirms
+a genuine `CANCELLED` result mints and durably appends a terminal `CANCELLED`
+`ExecutionReport` (via the existing gateway `mint_execution_report` boundary) — before
+writing the success `AUDIT_ARTIFACT` with decision `CANCEL`. Restart recovery is clear
+for that order only once this durable terminal `ExecutionReport` exists; `flatten-
+paper-only` cancels working orders for managed exit but mints no protected
+submit/report object and does not itself clear `unresolved_open_orders()`.
 
 ## 6. Deploy quick reference
 
@@ -187,7 +198,12 @@ file; they display only what is actually persisted, never fabricated state.
 `cancel-drill` submits one deterministic order that is left open (never
 auto-filled), then cancels it through the existing human-authorized
 `ControlPlane.cancel_open_orders` command (a freshly read `CANCEL` phrase, never
-a pre-supplied flag) — still paper-only, still local.
+a pre-supplied flag) — still paper-only, still local. A successful cancel drill
+persists an authenticated, gateway-minted terminal `CANCELLED` `ExecutionReport`
+(identity-resolved and authenticated against the persisted submit chain, then
+confirmed by the broker's own cancel response) before the success cancel audit
+artifact; the drill's returned `unresolved_open_orders` is empty only once that
+durable terminal evidence exists, never a fabricated claim of resolution.
 
 Fail-closed behavior (each has a rejection-first test in
 `tests/test_paper_operator_v1.py`): a fixture that is not the exact canonical

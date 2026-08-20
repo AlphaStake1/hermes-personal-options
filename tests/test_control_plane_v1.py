@@ -14,10 +14,18 @@ Behavior coverage proves the surface does its job: halt/resume persist + audit, 
 switch survives restart, cancel/flatten audit every action, reads are side-effect free
 beyond their single required audit event, and every command writes exactly one audit
 event.
+
+Cancel-terminal-reconciliation coverage (fixes HERMES-P12-P1-CANCEL-TERMINAL-
+RECONCILIATION-GAP-001) proves ``cancel-open-orders`` resolves and authenticates the
+persisted submit identity before ever cancelling, mints a durable terminal CANCELLED
+ExecutionReport only after the broker confirms it, and never fabricates that terminal
+record or the success CANCEL artifact on a missing, ambiguous, terminal, corrupt, or
+mismatched identity, a non-CANCELLED broker response, or a persistence failure.
 """
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -29,6 +37,12 @@ from brokers.base import (
     BrokerFill,
     BrokerPositionView,
 )
+from gateway import (
+    OrderRoutingState,
+    mint_broker_submit_intent,
+    mint_execution_report,
+    mint_order_ticket,
+)
 from ops.commands import main as ops_main
 from ops.control_plane import (
     CMD_CANCEL,
@@ -39,6 +53,7 @@ from ops.control_plane import (
     ControlPlane,
     HumanAuthorization,
     OperatorAuthorityError,
+    OperatorCancelIdentityError,
     OperatorConfirmationError,
     OperatorModeError,
     confirm_human,
@@ -46,8 +61,11 @@ from ops.control_plane import (
 )
 from schemas import (
     BrokerOrderId,
+    BrokerSubmitIntent,
     CandidateTradeIntent,
     CertificationStatus,
+    EmergencyState,
+    ExecutionReport,
     FeedCoverageStatus,
     FeedLatencyCheck,
     FeedProvider,
@@ -55,8 +73,10 @@ from schemas import (
     LegSide,
     OptionType,
     OrderLifecycleState,
+    OrderTypePolicy,
     PortfolioHeatCheck,
     ReasonCode,
+    RouteMode,
     SecondaryFeedCertification,
     SpreadDirection,
     SpreadLeg,
@@ -65,7 +85,7 @@ from schemas import (
     Underlying,
     ValidatedTradeIntent,
 )
-from schemas.enums import BrokerMode, ReArmMode
+from schemas.enums import BrokerMode, ReArmMode, SubmitMode
 from storage import StoredEvent, UnverifiedProvenanceError, rehydrate
 from storage.models import RecordType, payload_sha256
 from storage.sqlite_store import SqliteAuditStore
@@ -156,6 +176,43 @@ def _fill(
         requested_contracts=requested,
         submitted_at=NOW,
     )
+
+
+def _normal_routing() -> OrderRoutingState:
+    return OrderRoutingState(
+        route_mode=RouteMode.NORMAL,
+        order_type_policy=OrderTypePolicy(state=EmergencyState.NORMAL),
+        broker_native_combo_available=True,
+        deterministic_market_order_allowed=False,
+    )
+
+
+def _persist_open_order(
+    store: SqliteAuditStore,
+    broker_order_id: str,
+    *,
+    attempt_counter: int = 1,
+) -> BrokerSubmitIntent:
+    """Persist a real BrokerSubmitIntent + initial WORKING ExecutionReport whose
+    fields exactly match ``_fill(broker_order_id)``, so ``cancel_open_orders`` can
+    resolve and authenticate it against a broker-reported open order."""
+    ticket = mint_order_ticket(_validated(), _normal_routing(), created_at=FRESH)
+    intent = mint_broker_submit_intent(
+        ticket,
+        attempt_counter=attempt_counter,
+        submit_mode=SubmitMode.PAPER,
+        limit_price=Decimal("1.00"),
+        as_of=NOW,
+    )
+    store.record_submit_attempt(intent, recorded_at=NOW)
+    report = mint_execution_report(
+        intent,
+        broker_order_id=BrokerOrderId(value=broker_order_id, broker_name="paper"),
+        lifecycle_state=OrderLifecycleState.WORKING,
+        filled_contracts=0,
+    )
+    store.append(report, created_at=report.submitted_at, recorded_at=NOW)
+    return intent
 
 
 class _StubBroker(BrokerAdapter):
@@ -502,6 +559,8 @@ def test_cancel_rejects_missing_broker_and_audits(store: SqliteAuditStore):
 
 
 def test_cancel_cancels_open_orders_and_audits(store: SqliteAuditStore):
+    _persist_open_order(store, "o1", attempt_counter=1)
+    _persist_open_order(store, "o2", attempt_counter=2)
     broker = _StubBroker(open_orders=(_fill("o1"), _fill("o2")))
     plane = _plane(store, broker=broker)
     report = plane.cancel_open_orders(_auth(CMD_CANCEL))
@@ -510,6 +569,8 @@ def test_cancel_cancels_open_orders_and_audits(store: SqliteAuditStore):
         OrderLifecycleState.CANCELLED,
     ]
     assert broker.cancelled == ["o1", "o2"]
+    # both orders reached a durable terminal state: no unresolved orders remain.
+    assert store.unresolved_open_orders() == ()
 
 
 def test_cancel_audits_even_when_broker_raises(store: SqliteAuditStore):
@@ -517,6 +578,7 @@ def test_cancel_audits_even_when_broker_raises(store: SqliteAuditStore):
         def cancel_order(self, order_id: BrokerOrderId) -> BrokerFill:
             raise RuntimeError("broker connection lost")
 
+    _persist_open_order(store, "o1")
     broker = _RaisingBroker(open_orders=(_fill("o1"),))
     plane = _plane(store, broker=broker)
     with pytest.raises(RuntimeError, match="broker connection lost"):
@@ -528,6 +590,216 @@ def test_cancel_audits_even_when_broker_raises(store: SqliteAuditStore):
         if "cancel-open-orders" in e.record_id
     ]
     assert len(rejects) == 1
+    # no terminal report was fabricated: the order remains unresolved for recovery
+    assert len(store.unresolved_open_orders()) == 1
+    assert _count(store, RecordType.EXECUTION_REPORT) == 1  # only the initial WORKING report
+
+
+# ===========================================================================
+# BEHAVIOR: cancel-open-orders persists a provenance-authenticated terminal
+# CANCELLED ExecutionReport before the success artifact (fixes
+# HERMES-P12-P1-CANCEL-TERMINAL-RECONCILIATION-GAP-001)
+# ===========================================================================
+
+
+def test_cancel_wrong_confirmation_phrase_rejected():
+    with pytest.raises(OperatorConfirmationError, match="did not match"):
+        confirm_human(command=CMD_CANCEL, typed="cancel", expected="CANCEL")
+
+
+def test_cancel_persists_terminal_execution_report_with_deterministic_sequence(
+    store: SqliteAuditStore,
+):
+    intent = _persist_open_order(store, "o1")
+    broker = _StubBroker(open_orders=(_fill("o1"),))
+    plane = _plane(store, broker=broker)
+
+    report = plane.cancel_open_orders(_auth(CMD_CANCEL))
+    assert report.cancelled[0].lifecycle_state is OrderLifecycleState.CANCELLED
+
+    # deterministic, complete audit order for this logical order: submit intent,
+    # open WORKING report, terminal CANCELLED report, then the success artifact.
+    events = [
+        e
+        for e in store.iter_events()
+        if e.record_id == intent.idempotency_key
+        or (e.record_type is RecordType.AUDIT_ARTIFACT and "cancel-open-orders" in e.record_id)
+    ]
+    record_types = [e.record_type for e in events]
+    assert record_types == [
+        RecordType.BROKER_SUBMIT_INTENT,
+        RecordType.EXECUTION_REPORT,
+        RecordType.EXECUTION_REPORT,
+        RecordType.AUDIT_ARTIFACT,
+    ]
+    report_events = [e for e in events if e.record_type is RecordType.EXECUTION_REPORT]
+    lifecycles = [store.rehydrate(e).lifecycle_state for e in report_events]  # type: ignore[union-attr]
+    assert lifecycles == [OrderLifecycleState.WORKING, OrderLifecycleState.CANCELLED]
+    success_artifacts = [e for e in events if e.record_type is RecordType.AUDIT_ARTIFACT]
+    assert len(success_artifacts) == 1
+    assert json.loads(success_artifacts[0].payload_json)["decision"] == "CANCEL"
+
+    # identity is preserved end to end on the terminal (second) report.
+    terminal_report = store.rehydrate(report_events[1])
+    assert isinstance(terminal_report, ExecutionReport)
+    assert terminal_report.order_ticket_hash == intent.order_ticket_hash
+    assert terminal_report.idempotency_key == intent.idempotency_key
+    assert terminal_report.broker_order_id == "o1"
+    assert terminal_report.order_type == intent.ticket.order_type
+    assert terminal_report.requested_contracts == 1
+    assert terminal_report.filled_contracts == 0
+    assert terminal_report.submitted_at == intent.submitted_at
+    assert intent.submit_mode is SubmitMode.PAPER
+    # never fabricated: an unfilled cancel carries no invented price/fill evidence.
+    assert terminal_report.avg_fill_price is None
+    assert terminal_report.fill_timestamp is None
+
+    assert store.unresolved_open_orders() == ()
+
+
+def test_cancel_restart_recovery_clears_after_successful_cancel(tmp_path):
+    db = tmp_path / "audit.db"
+    s1 = SqliteAuditStore(db)
+    _persist_open_order(s1, "o1")
+    broker = _StubBroker(open_orders=(_fill("o1"),))
+    _plane(s1, broker=broker).cancel_open_orders(_auth(CMD_CANCEL))
+    s1.close()
+
+    s2 = SqliteAuditStore(db)
+    try:
+        assert s2.unresolved_open_orders() == ()
+    finally:
+        s2.close()
+
+
+def test_cancel_restart_recovery_still_unresolved_without_terminal_cancel(tmp_path):
+    """Contrast case: an open WORKING report with no terminal cancellation stays
+    unresolved across a restart — recovery semantics are unchanged by this fix."""
+    db = tmp_path / "audit.db"
+    s1 = SqliteAuditStore(db)
+    _persist_open_order(s1, "o1")
+    s1.close()
+
+    s2 = SqliteAuditStore(db)
+    try:
+        unresolved = s2.unresolved_open_orders()
+        assert len(unresolved) == 1
+        assert unresolved[0].latest_lifecycle is OrderLifecycleState.WORKING
+    finally:
+        s2.close()
+
+
+def test_cancel_refuses_broker_order_with_no_persisted_identity(store: SqliteAuditStore):
+    """A broker-reported open order with no matching persisted ExecutionReport is an
+    unauthenticated identity: refuse the whole command rather than cancel blind."""
+    broker = _StubBroker(open_orders=(_fill("ghost"),))
+    plane = _plane(store, broker=broker)
+    with pytest.raises(OperatorCancelIdentityError, match="no persisted ExecutionReport"):
+        plane.cancel_open_orders(_auth(CMD_CANCEL))
+    assert broker.cancelled == []
+    assert _count(store, RecordType.EXECUTION_REPORT) == 0
+
+
+def test_cancel_refuses_already_terminal_persisted_order(store: SqliteAuditStore):
+    """A persisted chain whose latest ExecutionReport is already terminal must refuse
+    cancellation even if the broker still (incoherently) reports the order open."""
+    intent = _persist_open_order(store, "o1")
+    terminal = mint_execution_report(
+        intent,
+        broker_order_id=BrokerOrderId(value="o1", broker_name="paper"),
+        lifecycle_state=OrderLifecycleState.CANCELLED,
+        filled_contracts=0,
+    )
+    store.append(terminal, created_at=terminal.submitted_at, recorded_at=NOW)
+    broker = _StubBroker(open_orders=(_fill("o1"),))
+    plane = _plane(store, broker=broker)
+    with pytest.raises(OperatorCancelIdentityError, match="already terminal"):
+        plane.cancel_open_orders(_auth(CMD_CANCEL))
+    assert broker.cancelled == []
+
+
+def test_cancel_refuses_when_broker_report_diverges_from_persisted_identity(
+    store: SqliteAuditStore,
+):
+    """The broker's live open-order view must match the persisted latest
+    ExecutionReport; a divergence (e.g. a different filled count) is a mismatch."""
+    _persist_open_order(store, "o1")
+    diverged = _fill("o1", filled=0, requested=2)  # persisted report says requested=1
+    broker = _StubBroker(open_orders=(diverged,))
+    plane = _plane(store, broker=broker)
+    with pytest.raises(OperatorCancelIdentityError, match="does not match"):
+        plane.cancel_open_orders(_auth(CMD_CANCEL))
+    assert broker.cancelled == []
+
+
+def test_cancel_refuses_non_cancelled_broker_response(store: SqliteAuditStore):
+    """If the broker's cancel response is not genuinely CANCELLED, no terminal report
+    is minted and no success artifact is written."""
+
+    class _NonCancellingBroker(_StubBroker):
+        def cancel_order(self, order_id: BrokerOrderId) -> BrokerFill:
+            self.cancelled.append(order_id.value)
+            return _fill(order_id.value, lifecycle=OrderLifecycleState.WORKING)
+
+    _persist_open_order(store, "o1")
+    broker = _NonCancellingBroker(open_orders=(_fill("o1"),))
+    plane = _plane(store, broker=broker)
+    with pytest.raises(OperatorCancelIdentityError, match="CANCELLED"):
+        plane.cancel_open_orders(_auth(CMD_CANCEL))
+    # only the original WORKING report is persisted — no fabricated terminal report
+    assert _count(store, RecordType.EXECUTION_REPORT) == 1
+    assert len(store.unresolved_open_orders()) == 1
+
+
+def test_cancel_refuses_broker_response_identity_mismatch(store: SqliteAuditStore):
+    """A broker cancel response that does not match the authenticated intent (e.g. a
+    different requested_contracts) must refuse rather than mint a mismatched report."""
+
+    class _MismatchedBroker(_StubBroker):
+        def cancel_order(self, order_id: BrokerOrderId) -> BrokerFill:
+            self.cancelled.append(order_id.value)
+            return _fill(
+                order_id.value,
+                lifecycle=OrderLifecycleState.CANCELLED,
+                requested=2,
+            )
+
+    _persist_open_order(store, "o1")
+    broker = _MismatchedBroker(open_orders=(_fill("o1"),))
+    plane = _plane(store, broker=broker)
+    with pytest.raises(OperatorCancelIdentityError, match="did not coherently confirm"):
+        plane.cancel_open_orders(_auth(CMD_CANCEL))
+    assert _count(store, RecordType.EXECUTION_REPORT) == 1
+
+
+def test_cancel_terminal_persistence_failure_blocks_success_artifact(tmp_path):
+    """A store failure while persisting the terminal report must not be papered over
+    with a fabricated success CANCEL artifact; the order stays unresolved."""
+
+    class _FailingStore(SqliteAuditStore):
+        def append(self, obj, **kwargs):  # type: ignore[override]
+            if isinstance(obj, ExecutionReport) and obj.lifecycle_state is OrderLifecycleState.CANCELLED:
+                raise RuntimeError("simulated persistence failure")
+            return super().append(obj, **kwargs)
+
+    db = tmp_path / "audit.db"
+    store = _FailingStore(db)
+    try:
+        _persist_open_order(store, "o1")
+        broker = _StubBroker(open_orders=(_fill("o1"),))
+        plane = _plane(store, broker=broker)
+        with pytest.raises(RuntimeError, match="simulated persistence failure"):
+            plane.cancel_open_orders(_auth(CMD_CANCEL))
+        cancel_artifacts = [
+            e
+            for e in store.iter_events(record_type=RecordType.AUDIT_ARTIFACT)
+            if "cancel-open-orders" in e.record_id
+        ]
+        assert len(cancel_artifacts) == 1
+        assert json.loads(cancel_artifacts[0].payload_json)["decision"] == "REJECT"
+        assert len(store.unresolved_open_orders()) == 1
+    finally:
+        store.close()
 
 
 @pytest.mark.parametrize("mode", [BrokerMode.NONE, BrokerMode.LIVE_READONLY, None])
@@ -621,6 +893,7 @@ def test_export_audit_writes_jsonl_and_audits(store: SqliteAuditStore, tmp_path)
 
 
 def test_every_command_writes_exactly_one_audit_event(store: SqliteAuditStore):
+    _persist_open_order(store, "o1")
     broker = _StubBroker(open_orders=(_fill("o1"),))
     plane = _plane(store, broker=broker, broker_mode=BrokerMode.PAPER)
 
