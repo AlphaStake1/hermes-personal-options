@@ -21,6 +21,15 @@ persisted submit identity before ever cancelling, mints a durable terminal CANCE
 ExecutionReport only after the broker confirms it, and never fabricates that terminal
 record or the success CANCEL artifact on a missing, ambiguous, terminal, corrupt, or
 mismatched identity, a non-CANCELLED broker response, or a persistence failure.
+
+Partial-fill cancel-evidence coverage (fixes HERMES-P12-P1-CANCEL-REVIEW-V3-FINDING-001)
+proves a broker cancel response for a partially filled order must match the
+authenticated open ExecutionReport's filled_contracts, avg_fill_price, and
+fill_timestamp before a terminal CANCELLED report is minted or persisted; any
+divergence in one of those three fields refuses the whole command and never erases or
+rewrites the earlier authenticated partial-fill evidence, while a matching response
+persists a terminal report that preserves that evidence exactly and clears the order
+from the unresolved set.
 """
 
 from __future__ import annotations
@@ -95,6 +104,7 @@ pytestmark = pytest.mark.unit
 UTC = timezone.utc
 NOW = datetime(2026, 6, 20, 15, 0, tzinfo=UTC)
 FRESH = NOW - timedelta(seconds=30)
+FILL_AT = NOW + timedelta(seconds=5)
 
 
 def _clock() -> datetime:
@@ -131,7 +141,7 @@ def _candidate(contracts: int = 1) -> CandidateTradeIntent:
     )
 
 
-def _validated() -> ValidatedTradeIntent:
+def _validated(contracts: int = 1) -> ValidatedTradeIntent:
     approved_heat = PortfolioHeatCheck(
         sum_defined_max_loss=Decimal("400"),
         broker_margin_requirement=Decimal("4000"),
@@ -155,7 +165,7 @@ def _validated() -> ValidatedTradeIntent:
     ).to_live_token(NOW)
     live = StrategyStageState(stage=StrategyStage.LIVE).to_live_token()
     return ValidatedTradeIntent(
-        candidate=_candidate(),
+        candidate=_candidate(contracts),
         approved_heat=approved_heat,
         certified_feed=feed,
         live_strategy=live,
@@ -174,6 +184,26 @@ def _fill(
         lifecycle_state=lifecycle,
         filled_contracts=filled,
         requested_contracts=requested,
+        submitted_at=NOW,
+    )
+
+
+def _partial_fill(
+    value: str,
+    *,
+    lifecycle: OrderLifecycleState = OrderLifecycleState.PARTIAL_FILL,
+    requested: int = 2,
+    filled: int = 1,
+    avg_fill_price: Decimal | None = Decimal("1.00"),
+    fill_timestamp: datetime | None = FILL_AT,
+) -> BrokerFill:
+    return BrokerFill(
+        broker_order_id=BrokerOrderId(value=value, broker_name="paper"),
+        lifecycle_state=lifecycle,
+        filled_contracts=filled,
+        requested_contracts=requested,
+        avg_fill_price=avg_fill_price,
+        fill_timestamp=fill_timestamp,
         submitted_at=NOW,
     )
 
@@ -210,6 +240,41 @@ def _persist_open_order(
         broker_order_id=BrokerOrderId(value=broker_order_id, broker_name="paper"),
         lifecycle_state=OrderLifecycleState.WORKING,
         filled_contracts=0,
+    )
+    store.append(report, created_at=report.submitted_at, recorded_at=NOW)
+    return intent
+
+
+def _persist_partial_fill_open_order(
+    store: SqliteAuditStore,
+    broker_order_id: str,
+    *,
+    requested: int = 2,
+    filled: int = 1,
+    avg_fill_price: Decimal = Decimal("1.00"),
+    fill_timestamp: datetime = FILL_AT,
+    attempt_counter: int = 1,
+) -> BrokerSubmitIntent:
+    """Persist a real BrokerSubmitIntent + a PARTIAL_FILL ExecutionReport carrying
+    genuine fill evidence (contracts/price/timestamp), matching ``_partial_fill(...)``
+    with the same keyword defaults, so ``cancel_open_orders`` can resolve and
+    authenticate it against a broker-reported partially filled open order."""
+    ticket = mint_order_ticket(_validated(requested), _normal_routing(), created_at=FRESH)
+    intent = mint_broker_submit_intent(
+        ticket,
+        attempt_counter=attempt_counter,
+        submit_mode=SubmitMode.PAPER,
+        limit_price=Decimal("1.00"),
+        as_of=NOW,
+    )
+    store.record_submit_attempt(intent, recorded_at=NOW)
+    report = mint_execution_report(
+        intent,
+        broker_order_id=BrokerOrderId(value=broker_order_id, broker_name="paper"),
+        lifecycle_state=OrderLifecycleState.PARTIAL_FILL,
+        filled_contracts=filled,
+        avg_fill_price=avg_fill_price,
+        fill_timestamp=fill_timestamp,
     )
     store.append(report, created_at=report.submitted_at, recorded_at=NOW)
     return intent
@@ -770,6 +835,160 @@ def test_cancel_refuses_broker_response_identity_mismatch(store: SqliteAuditStor
     with pytest.raises(OperatorCancelIdentityError, match="did not coherently confirm"):
         plane.cancel_open_orders(_auth(CMD_CANCEL))
     assert _count(store, RecordType.EXECUTION_REPORT) == 1
+
+
+class _PartialFillCancelBroker(_StubBroker):
+    """Cancels a broker-reported open order by returning a caller-supplied cancel
+    ``BrokerFill`` — used to simulate a broker cancel response whose fill evidence
+    (filled_contracts / avg_fill_price / fill_timestamp) may or may not match the
+    authenticated open order it is cancelling."""
+
+    def __init__(
+        self, *, open_orders: tuple[BrokerFill, ...], cancel_result: BrokerFill
+    ) -> None:
+        super().__init__(open_orders=open_orders)
+        self._cancel_result = cancel_result
+
+    def cancel_order(self, order_id: BrokerOrderId) -> BrokerFill:
+        self.cancelled.append(order_id.value)
+        return self._cancel_result
+
+
+def _assert_original_partial_fill_evidence_untouched(store: SqliteAuditStore) -> None:
+    """No terminal report was fabricated: the sole persisted ExecutionReport is still
+    the original PARTIAL_FILL report, with its fill evidence unchanged."""
+    assert _count(store, RecordType.EXECUTION_REPORT) == 1
+    events = list(store.iter_events(record_type=RecordType.EXECUTION_REPORT))
+    original = store.rehydrate(events[0])
+    assert isinstance(original, ExecutionReport)
+    assert original.lifecycle_state is OrderLifecycleState.PARTIAL_FILL
+    assert original.filled_contracts == 1
+    assert original.avg_fill_price == Decimal("1.00")
+    assert original.fill_timestamp == FILL_AT
+    assert len(store.unresolved_open_orders()) == 1
+
+
+def test_cancel_refuses_partial_fill_cancel_response_with_mismatched_filled_contracts(
+    store: SqliteAuditStore,
+):
+    """A broker cancel response for a partially filled order that reports a different
+    filled_contracts than the authenticated open evidence must refuse the terminal
+    report and leave the original partial-fill evidence untouched."""
+    _persist_partial_fill_open_order(store, "o1")
+    broker = _PartialFillCancelBroker(
+        open_orders=(_partial_fill("o1"),),
+        cancel_result=_partial_fill(
+            "o1", lifecycle=OrderLifecycleState.CANCELLED, filled=2
+        ),
+    )
+    plane = _plane(store, broker=broker)
+    with pytest.raises(OperatorCancelIdentityError, match="did not coherently confirm"):
+        plane.cancel_open_orders(_auth(CMD_CANCEL))
+    assert broker.cancelled == ["o1"]
+    _assert_original_partial_fill_evidence_untouched(store)
+
+
+def test_cancel_refuses_partial_fill_cancel_response_with_mismatched_avg_fill_price(
+    store: SqliteAuditStore,
+):
+    """A broker cancel response for a partially filled order that reports a different
+    avg_fill_price than the authenticated open evidence must refuse the terminal
+    report and leave the original partial-fill evidence untouched."""
+    _persist_partial_fill_open_order(store, "o1")
+    broker = _PartialFillCancelBroker(
+        open_orders=(_partial_fill("o1"),),
+        cancel_result=_partial_fill(
+            "o1",
+            lifecycle=OrderLifecycleState.CANCELLED,
+            avg_fill_price=Decimal("1.05"),
+        ),
+    )
+    plane = _plane(store, broker=broker)
+    with pytest.raises(OperatorCancelIdentityError, match="did not coherently confirm"):
+        plane.cancel_open_orders(_auth(CMD_CANCEL))
+    assert broker.cancelled == ["o1"]
+    _assert_original_partial_fill_evidence_untouched(store)
+
+
+def test_cancel_refuses_partial_fill_cancel_response_with_mismatched_fill_timestamp(
+    store: SqliteAuditStore,
+):
+    """A broker cancel response for a partially filled order that reports a different
+    fill_timestamp than the authenticated open evidence must refuse the terminal
+    report and leave the original partial-fill evidence untouched."""
+    _persist_partial_fill_open_order(store, "o1")
+    broker = _PartialFillCancelBroker(
+        open_orders=(_partial_fill("o1"),),
+        cancel_result=_partial_fill(
+            "o1", lifecycle=OrderLifecycleState.CANCELLED, fill_timestamp=NOW
+        ),
+    )
+    plane = _plane(store, broker=broker)
+    with pytest.raises(OperatorCancelIdentityError, match="did not coherently confirm"):
+        plane.cancel_open_orders(_auth(CMD_CANCEL))
+    assert broker.cancelled == ["o1"]
+    _assert_original_partial_fill_evidence_untouched(store)
+
+
+def test_cancel_persists_terminal_report_preserving_partial_fill_evidence(
+    store: SqliteAuditStore,
+):
+    """A broker cancel response whose fill evidence matches the authenticated open
+    report mints a durable terminal CANCELLED report that preserves the original
+    filled-contract count, average fill price, and fill timestamp — and the order is
+    no longer unresolved."""
+    intent = _persist_partial_fill_open_order(store, "o1")
+    broker = _PartialFillCancelBroker(
+        open_orders=(_partial_fill("o1"),),
+        cancel_result=_partial_fill("o1", lifecycle=OrderLifecycleState.CANCELLED),
+    )
+    plane = _plane(store, broker=broker)
+
+    report = plane.cancel_open_orders(_auth(CMD_CANCEL))
+    assert report.cancelled[0].lifecycle_state is OrderLifecycleState.CANCELLED
+
+    report_events = list(store.iter_events(record_type=RecordType.EXECUTION_REPORT))
+    assert len(report_events) == 2
+
+    original = store.rehydrate(report_events[0])
+    assert isinstance(original, ExecutionReport)
+    assert original.lifecycle_state is OrderLifecycleState.PARTIAL_FILL
+    assert original.filled_contracts == 1
+    assert original.avg_fill_price == Decimal("1.00")
+    assert original.fill_timestamp == FILL_AT
+
+    terminal = store.rehydrate(report_events[1])
+    assert isinstance(terminal, ExecutionReport)
+    assert terminal.lifecycle_state is OrderLifecycleState.CANCELLED
+    assert terminal.order_ticket_hash == intent.order_ticket_hash
+    assert terminal.idempotency_key == intent.idempotency_key
+    assert terminal.requested_contracts == 2
+    # the terminal report preserves the exact partial-fill evidence, unchanged.
+    assert terminal.filled_contracts == 1
+    assert terminal.avg_fill_price == Decimal("1.00")
+    assert terminal.fill_timestamp == FILL_AT
+
+    assert store.unresolved_open_orders() == ()
+
+
+def test_cancel_restart_recovery_clears_after_partial_fill_cancel(tmp_path):
+    """Restart/reopen verification: once a partial-fill order is genuinely cancelled
+    with matching evidence, it is no longer unresolved after a fresh store open."""
+    db = tmp_path / "audit.db"
+    s1 = SqliteAuditStore(db)
+    _persist_partial_fill_open_order(s1, "o1")
+    broker = _PartialFillCancelBroker(
+        open_orders=(_partial_fill("o1"),),
+        cancel_result=_partial_fill("o1", lifecycle=OrderLifecycleState.CANCELLED),
+    )
+    _plane(s1, broker=broker).cancel_open_orders(_auth(CMD_CANCEL))
+    s1.close()
+
+    s2 = SqliteAuditStore(db)
+    try:
+        assert s2.unresolved_open_orders() == ()
+    finally:
+        s2.close()
 
 
 def test_cancel_terminal_persistence_failure_blocks_success_artifact(tmp_path):

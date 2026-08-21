@@ -26,9 +26,14 @@ thin argparse wrapper. SYSTEM_ARCHITECTURE / roadmap Phase 10 boundary:
     broker cancellation is attempted; a missing, ambiguous, terminal, corrupt, or
     mismatched chain refuses the whole command before a single broker call happens,
     and never fabricates a terminal record for an order it could not authenticate.
-    A later broker or persistence failure mid-batch still refuses the success artifact
-    for the whole command, while any order already genuinely cancelled and durably
-    recorded before that failure keeps its real terminal record.
+    The broker's cancel response must also match that authenticated evidence's
+    ``filled_contracts``, ``avg_fill_price``, and ``fill_timestamp`` — a partially
+    filled order that the broker cancels with divergent fill evidence refuses the
+    terminal report rather than minting or persisting one, and never erases or
+    rewrites the earlier authenticated partial-fill evidence. A later broker or
+    persistence failure mid-batch still refuses the success artifact for the whole
+    command, while any order already genuinely cancelled and durably recorded before
+    that failure keeps its real terminal record.
 """
 
 from __future__ import annotations
@@ -536,7 +541,16 @@ class ControlPlane:
         provenance-bound terminal ``ExecutionReport`` — only after the broker confirms
         a genuine ``CANCELLED`` result coherent with the authenticated intent. Never
         invents a fill or price: every minted field is read directly off the broker's
-        own cancel response."""
+        own cancel response.
+
+        ``fill`` was already authenticated by ``_resolve_cancel_identity`` to carry the
+        same ``filled_contracts`` / ``avg_fill_price`` / ``fill_timestamp`` as the
+        latest persisted open ``ExecutionReport``, so requiring the cancel response to
+        match ``fill`` on those three fields is exactly "match the authenticated open
+        report". A mismatch (e.g. a broker cancel response that silently reports a
+        different fill count or price for a partially filled order) refuses the whole
+        command before any terminal report is minted or persisted, and never rewrites
+        the earlier authenticated partial-fill evidence."""
         assert self._broker is not None  # guarded by the caller
         cancel_fill = self._broker.cancel_order(fill.broker_order_id)
         requested_contracts = intent.ticket.validated_intent.candidate.short_leg.contracts
@@ -544,13 +558,17 @@ class ControlPlane:
             cancel_fill.broker_order_id != fill.broker_order_id
             or cancel_fill.lifecycle_state is not OrderLifecycleState.CANCELLED
             or cancel_fill.requested_contracts != requested_contracts
+            or cancel_fill.filled_contracts != fill.filled_contracts
+            or cancel_fill.avg_fill_price != fill.avg_fill_price
+            or cancel_fill.fill_timestamp != fill.fill_timestamp
             or cancel_fill.submitted_at != intent.submitted_at
         ):
             raise OperatorCancelIdentityError(
                 f"broker cancel response for broker_order_id="
                 f"{fill.broker_order_id.value!r} did not coherently confirm a genuine "
-                "CANCELLED terminal state for the authenticated order; refusing to "
-                "persist a terminal ExecutionReport"
+                "CANCELLED terminal state matching the authenticated open order's "
+                "filled_contracts/avg_fill_price/fill_timestamp for the authenticated "
+                "order; refusing to persist a terminal ExecutionReport"
             )
         report = mint_execution_report(
             intent,
