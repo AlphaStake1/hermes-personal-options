@@ -272,6 +272,18 @@ class AppConfig(HermesModel):
             raise ValueError("APP_ENV=live_readonly requires SUBMISSION_ENABLED=false")
         if self.paper_submit_enabled:
             raise ValueError("APP_ENV=live_readonly requires PAPER_SUBMIT_ENABLED=false")
+        # Phase 15 (Live-Money Readiness, Not Deployment) reconciles LIVE read-only data
+        # and acts on NOTHING (roadmap §Phase 15). Unlike vm_shadow/vm_paper — which run
+        # the full read-only-data -> candidate -> gateway -> ticketing pipeline — a
+        # live_readonly deploy has no candidates to act on and mints no order tickets, so
+        # both must be off. Enforcing them here keeps the read-only feature shape from
+        # drifting into candidate-generating or ticket-minting behavior. MARKET_DATA_ENABLED
+        # and GATEWAY_ENABLED stay unconstrained: they are read/observability knobs that
+        # cannot reach a submit lane.
+        if self.candidate_generation_enabled:
+            raise ValueError("APP_ENV=live_readonly requires CANDIDATE_GENERATION_ENABLED=false")
+        if self.order_ticketing_enabled:
+            raise ValueError("APP_ENV=live_readonly requires ORDER_TICKETING_ENABLED=false")
 
     def _require_local_invariants(self) -> None:
         # Local dev may run shadow-style (none) or paper, never live.

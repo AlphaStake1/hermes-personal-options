@@ -126,7 +126,15 @@ VALID_PAPER_ENV: dict[str, str] = {
     "env",
     [
         VALID_PAPER_ENV,
-        {**VALID_SHADOW_ENV, "APP_ENV": "live_readonly", "BROKER_MODE": "live_readonly"},
+        {
+            **VALID_SHADOW_ENV,
+            "APP_ENV": "live_readonly",
+            "BROKER_MODE": "live_readonly",
+            # live_readonly forbids candidate generation and order ticketing (Phase 15),
+            # so the valid non-shadow shape must set both off to construct at all.
+            "CANDIDATE_GENERATION_ENABLED": "false",
+            "ORDER_TICKETING_ENABLED": "false",
+        },
         {
             **VALID_SHADOW_ENV,
             "APP_ENV": "local",
