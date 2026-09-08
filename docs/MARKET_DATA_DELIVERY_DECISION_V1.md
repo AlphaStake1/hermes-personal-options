@@ -30,17 +30,23 @@ recorded baseline).
 
 ## IBKR unattended World B data — documentary knockout
 
-Official IBKR documentation, checked during orchestration on 2026-09-08:
+Official IBKR TWS API documentation, checked during orchestration on
+2026-09-08: [The IB Gateway](https://www.interactivebrokers.com/docs/tws-api/doc/architecture/the-trader-workstation/the-ib-gateway).
 
-> [The IB Gateway](https://www.interactivebrokers.com/docs/tws-api/doc/architecture/the-trader-workstation/the-ib-gateway):
-> TWS and IB Gateway require manual GUI login; GUI-free sessions are
-> unsupported. An automatic daily restart can carry a session through a week,
-> but the Saturday-night reset requires credentials again.
+**Paraphrase, not a direct quotation** (the orchestration-supplied documentary
+input summarized, rather than quoted verbatim, the cited page): TWS and IB
+Gateway require a manual GUI login, and a GUI-free session is not documented
+as supported for either. An automatic daily restart can carry an
+already-authenticated session through the trading week, but the Saturday-night
+reset requires credentials to be re-entered again.
 
-**Finding:** IBKR's own architecture documentation states that both TWS and IB
-Gateway — the only two officially documented API session hosts — require a
-manual, interactive GUI login, with no officially documented GUI-free session
-path. The documented automatic-restart behavior only extends an
+**Finding:** the cited TWS API architecture documentation states that both TWS
+and IB Gateway — the two session hosts documented for **the TWS API
+specifically** (not a claim about every IBKR API; IBKR also documents other
+API surfaces, such as the Client Portal Web API, that this source does not
+cover and that this finding does not evaluate) — require a manual, interactive
+GUI login, with no officially documented GUI-free session path for either host.
+The documented automatic-restart behavior only extends an
 already-manually-authenticated session through the trading week; it does not
 remove the recurring manual login requirement, since the weekly reset still
 requires credentials to be re-entered by a human at the console.

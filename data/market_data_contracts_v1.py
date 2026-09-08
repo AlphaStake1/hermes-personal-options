@@ -27,32 +27,56 @@ XSP included — see ``is_within_trading_scope`` on each observation type.
 
 RTH-only, no inferred calendar: ``EvidenceSession`` requires an explicit
 ``session_date``, explicit tz-aware ``rth_start``/``rth_end`` bounds, and a
-non-blank ``provenance`` string for every session. There is no weekday-derived or
-fixed-UTC-hour inference anywhere in this module. Production calendar
-verification (holidays, early closes, DST, exchange-published session
-schedules) is explicitly deferred to a future, separately-certified calendar
-source; this contract only proves internal consistency of whatever bounds the
-caller supplies, never that those bounds are the real exchange calendar for that
-date.
+non-blank ``provenance`` string for every session. Both bounds must carry a UTC
+(``+00:00``) offset — any other offset is rejected explicitly rather than
+silently normalized — and each bound's calendar date must equal ``session_date``,
+so a session can never internally disagree with its own stated trading day.
+There is no weekday-derived or fixed-UTC-hour inference anywhere in this module.
+Production calendar verification (holidays, early closes, DST, exchange-published
+session schedules) is explicitly deferred to a future, separately-certified
+calendar source; this contract only proves internal consistency of whatever
+bounds the caller supplies, never that those bounds are the real exchange
+calendar for that date.
+
+Every timestamp field on every type in this module (``EvidenceSession.rth_start``/
+``rth_end``, and every ``event_ts``/``receive_ts``/``expiration_date``/
+``last_trading_time``) must likewise carry a UTC offset; a non-UTC-aware
+timestamp is rejected at construction rather than silently accepted or
+normalized. An option observation is also rejected if its ``event_ts`` or
+``receive_ts`` falls after the contract's own ``last_trading_time`` — evidence
+cannot describe a print for a contract already past its last trading time.
 
 Freshness (stale/future) is evaluated only via an explicit caller-supplied
 ``as_of`` passed to ``freshness_reason`` / ``is_fresh_as_of`` — never from a
 wall clock read inside this module — mirroring
 ``schemas.broker_data_snapshot.BrokerDataSnapshot``. The Constitution §10
-freshness ceilings (``MAX_QUOTE_AGE_MS_NORMAL`` / ``MAX_UNDERLYING_PRICE_AGE_MS``)
-are imported, not duplicated, so this module cannot silently drift from the
-Gateway's own limits.
+freshness ceilings (``MAX_QUOTE_AGE_MS_NORMAL`` / ``MAX_QUOTE_AGE_MS_0DTE_AFTER_2PM_CT``
+/ ``MAX_UNDERLYING_PRICE_AGE_MS``) are imported, not duplicated, so this module
+cannot silently drift from the Gateway's own limits. Both ``event_ts`` and
+``receive_ts`` are checked against the ceiling (an old source event that was only
+just received is still stale), using exact ``timedelta`` comparisons rather than
+truncated integer millisecond math. An option observation's freshness check
+requires the caller to state, explicitly, whether the late-day zero-DTE ceiling
+applies (``zero_dte_after_2pm_ct``) — there is no default that could silently
+waive the tighter 500ms limit. An optional ``max_age_ms`` override may only
+*tighten*, never widen, the applicable constitutional ceiling, and a
+non-``int``, ``bool``, non-positive, or ceiling-exceeding override is rejected
+outright.
 """
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from pydantic import AwareDatetime, Field, model_validator
 
 from schemas import HermesModel, OptionType, Underlying
-from schemas.broker_data_snapshot import MAX_QUOTE_AGE_MS_NORMAL, MAX_UNDERLYING_PRICE_AGE_MS
+from schemas.broker_data_snapshot import (
+    MAX_QUOTE_AGE_MS_0DTE_AFTER_2PM_CT,
+    MAX_QUOTE_AGE_MS_NORMAL,
+    MAX_UNDERLYING_PRICE_AGE_MS,
+)
 from schemas.enums import StrEnum
 
 # --- Option-root scope (Constitution §2 mapping, evidence-side) --------------
@@ -135,6 +159,9 @@ class EvidenceRejectionReason(StrEnum):
     AMBIGUOUS_DUPLICATE = "AMBIGUOUS_DUPLICATE"
     OUT_OF_SESSION = "OUT_OF_SESSION"
     CONTRADICTORY_TIMESTAMPS = "CONTRADICTORY_TIMESTAMPS"
+    NON_UTC_TIMESTAMP = "NON_UTC_TIMESTAMP"
+    SESSION_DATE_MISMATCH = "SESSION_DATE_MISMATCH"
+    POST_EXPIRATION_OBSERVATION = "POST_EXPIRATION_OBSERVATION"
     INVALID_PRICE = "INVALID_PRICE"
     INVALID_SIZE = "INVALID_SIZE"
     INCOMPLETE_NBBO = "INCOMPLETE_NBBO"
@@ -163,6 +190,39 @@ def _require_identity(name: str, value: str) -> None:
         )
 
 
+def _require_utc(name: str, value: datetime) -> None:
+    if value.utcoffset() != timedelta(0):
+        raise ValueError(
+            f"{name} must use a UTC (+00:00) offset, not {value.isoformat()} "
+            f"({EvidenceRejectionReason.NON_UTC_TIMESTAMP})"
+        )
+
+
+def _validated_freshness_ceiling_ms(candidate: int | None, ceiling_ms: int) -> int:
+    """Resolve the effective freshness ceiling, in milliseconds.
+
+    ``candidate`` (an optional caller override of ``ceiling_ms``) may only
+    *tighten*, never widen, the applicable constitutional ceiling for this
+    context. A non-``int`` (including ``bool``, a ``str.__bool__`` subclass of
+    ``int``, and any float such as ``nan``/``inf``), non-positive, or
+    ceiling-exceeding override is rejected outright rather than silently
+    clamped or coerced.
+    """
+    if candidate is None:
+        return ceiling_ms
+    if isinstance(candidate, bool) or not isinstance(candidate, int):
+        raise ValueError(
+            f"max_age_ms override must be a plain positive int, not "
+            f"{candidate!r} ({type(candidate).__name__})"
+        )
+    if candidate <= 0 or candidate > ceiling_ms:
+        raise ValueError(
+            f"max_age_ms override {candidate} must be a positive int no greater "
+            f"than the constitutional ceiling {ceiling_ms}ms for this context"
+        )
+    return candidate
+
+
 # --- Session -------------------------------------------------------------------
 
 
@@ -184,16 +244,31 @@ class EvidenceSession(HermesModel):
     @model_validator(mode="after")
     def _session_is_internally_consistent(self) -> "EvidenceSession":
         _require_identity("provenance", self.provenance)
+        _require_utc("rth_start", self.rth_start)
+        _require_utc("rth_end", self.rth_end)
         if self.rth_end <= self.rth_start:
             raise ValueError(
                 "rth_end must be strictly after rth_start "
                 f"({EvidenceRejectionReason.CONTRADICTORY_TIMESTAMPS})"
+            )
+        if self.rth_start.date() != self.session_date:
+            raise ValueError(
+                f"rth_start date {self.rth_start.date()} does not match "
+                f"session_date {self.session_date} "
+                f"({EvidenceRejectionReason.SESSION_DATE_MISMATCH})"
+            )
+        if self.rth_end.date() != self.session_date:
+            raise ValueError(
+                f"rth_end date {self.rth_end.date()} does not match "
+                f"session_date {self.session_date} "
+                f"({EvidenceRejectionReason.SESSION_DATE_MISMATCH})"
             )
         return self
 
     def contains(self, ts: datetime) -> bool:
         if ts.tzinfo is None:
             raise ValueError("timestamp must be timezone-aware (UTC)")
+        _require_utc("timestamp", ts)
         return self.rth_start <= ts <= self.rth_end
 
 
@@ -240,20 +315,28 @@ class UnderlyingEvidenceObservation(HermesModel):
         return self.underlying in EVIDENCE_TRADING_SCOPE
 
     def freshness_reason(
-        self, as_of: datetime, *, max_age_ms: int = MAX_UNDERLYING_PRICE_AGE_MS
+        self, as_of: datetime, *, max_age_ms: int | None = None
     ) -> EvidenceFreshnessReason | None:
+        """Stale/future check against an explicit ``as_of``.
+
+        Both ``event_ts`` and ``receive_ts`` are checked against the ceiling —
+        an old source event that was only just received is still stale, not
+        fresh. Comparisons use exact ``timedelta`` arithmetic (no truncated
+        integer-millisecond rounding).
+        """
         if as_of.tzinfo is None:
             raise ValueError("as_of must be timezone-aware (UTC)")
+        _require_utc("as_of", as_of)
         if self.event_ts > as_of or self.receive_ts > as_of:
             return EvidenceFreshnessReason.FUTURE_TIMESTAMP
-        age_ms = int((as_of - self.receive_ts).total_seconds() * 1000)
-        if age_ms > max_age_ms:
+        limit = timedelta(
+            milliseconds=_validated_freshness_ceiling_ms(max_age_ms, MAX_UNDERLYING_PRICE_AGE_MS)
+        )
+        if (as_of - self.event_ts) > limit or (as_of - self.receive_ts) > limit:
             return EvidenceFreshnessReason.STALE
         return None
 
-    def is_fresh_as_of(
-        self, as_of: datetime, *, max_age_ms: int = MAX_UNDERLYING_PRICE_AGE_MS
-    ) -> bool:
+    def is_fresh_as_of(self, as_of: datetime, *, max_age_ms: int | None = None) -> bool:
         return self.freshness_reason(as_of, max_age_ms=max_age_ms) is None
 
     @model_validator(mode="after")
@@ -261,6 +344,8 @@ class UnderlyingEvidenceObservation(HermesModel):
         _require_identity("provider", self.provider)
         _require_identity("source_product", self.source_product)
         _require_identity("source_symbol", self.source_symbol)
+        _require_utc("event_ts", self.event_ts)
+        _require_utc("receive_ts", self.receive_ts)
 
         if self.value_kind is not UnderlyingValueKind.OFFICIAL_INDEX_VALUE:
             raise ValueError(
@@ -356,27 +441,64 @@ class OptionEvidenceObservation(HermesModel):
         return self.underlying in EVIDENCE_TRADING_SCOPE
 
     def freshness_reason(
-        self, as_of: datetime, *, max_age_ms: int = MAX_QUOTE_AGE_MS_NORMAL
+        self,
+        as_of: datetime,
+        *,
+        zero_dte_after_2pm_ct: bool,
+        max_age_ms: int | None = None,
     ) -> EvidenceFreshnessReason | None:
+        """Stale/future check against an explicit ``as_of``.
+
+        ``zero_dte_after_2pm_ct`` is a required, explicit, caller-supplied
+        deterministic context flag — there is no default value, so a caller can
+        never accidentally waive the tighter Constitution §10 late-day 0-DTE
+        500ms ceiling by omission. Both ``event_ts`` and ``receive_ts`` are
+        checked against the ceiling using exact ``timedelta`` arithmetic (no
+        truncated integer-millisecond rounding), so an old source event that was
+        only just received is still stale, not fresh.
+        """
         if as_of.tzinfo is None:
             raise ValueError("as_of must be timezone-aware (UTC)")
+        _require_utc("as_of", as_of)
+        if not isinstance(zero_dte_after_2pm_ct, bool):
+            raise ValueError("zero_dte_after_2pm_ct must be an explicit bool")
+        ceiling_ms = (
+            MAX_QUOTE_AGE_MS_0DTE_AFTER_2PM_CT
+            if zero_dte_after_2pm_ct
+            else MAX_QUOTE_AGE_MS_NORMAL
+        )
         if self.event_ts > as_of or self.receive_ts > as_of:
             return EvidenceFreshnessReason.FUTURE_TIMESTAMP
-        age_ms = int((as_of - self.receive_ts).total_seconds() * 1000)
-        if age_ms > max_age_ms:
+        limit = timedelta(milliseconds=_validated_freshness_ceiling_ms(max_age_ms, ceiling_ms))
+        if (as_of - self.event_ts) > limit or (as_of - self.receive_ts) > limit:
             return EvidenceFreshnessReason.STALE
         return None
 
     def is_fresh_as_of(
-        self, as_of: datetime, *, max_age_ms: int = MAX_QUOTE_AGE_MS_NORMAL
+        self,
+        as_of: datetime,
+        *,
+        zero_dte_after_2pm_ct: bool,
+        max_age_ms: int | None = None,
     ) -> bool:
-        return self.freshness_reason(as_of, max_age_ms=max_age_ms) is None
+        return (
+            self.freshness_reason(
+                as_of,
+                zero_dte_after_2pm_ct=zero_dte_after_2pm_ct,
+                max_age_ms=max_age_ms,
+            )
+            is None
+        )
 
     @model_validator(mode="after")
     def _validate(self) -> "OptionEvidenceObservation":
         _require_identity("provider", self.provider)
         _require_identity("source_product", self.source_product)
         _require_identity("source_symbol", self.source_symbol)
+        _require_utc("event_ts", self.event_ts)
+        _require_utc("receive_ts", self.receive_ts)
+        _require_utc("expiration_date", self.expiration_date)
+        _require_utc("last_trading_time", self.last_trading_time)
 
         expected_underlying = _OPTION_ROOT_UNDERLYING[self.option_root]
         if self.underlying is not expected_underlying:
@@ -395,6 +517,16 @@ class OptionEvidenceObservation(HermesModel):
             raise ValueError(
                 "receive_ts cannot be before event_ts "
                 f"({EvidenceRejectionReason.CONTRADICTORY_TIMESTAMPS})"
+            )
+        if self.event_ts > self.last_trading_time:
+            raise ValueError(
+                "event_ts cannot be after the contract's last_trading_time "
+                f"({EvidenceRejectionReason.POST_EXPIRATION_OBSERVATION})"
+            )
+        if self.receive_ts > self.last_trading_time:
+            raise ValueError(
+                "receive_ts cannot be after the contract's last_trading_time "
+                f"({EvidenceRejectionReason.POST_EXPIRATION_OBSERVATION})"
             )
         if not self.session.contains(self.event_ts):
             raise ValueError(

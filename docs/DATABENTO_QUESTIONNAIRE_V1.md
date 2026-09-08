@@ -18,6 +18,16 @@ during the initial stage, raw or normalized data excluded from any LLM or World
 A agent. Regular trading hours (RTH) only. Non-display, automated,
 single-UserID use.
 
+**Product scope, stated exactly:** Hermes's Constitution §2 Phase-1 *trading*
+product is **XSP only** — no other underlying is live-tradable at this stage.
+The *evidence* scope requested from Databento is broader than the trading
+scope: **XSP, SPX, and SPXW** underlying/option evidence, because the offline
+evidence contracts (`data/market_data_contracts_v1.py`) and the strategy/
+research pipeline need SPX/SPXW context even though only XSP is currently
+tradable. Do not read "SPX/SPXW" anywhere in this document as a trading-scope
+expansion; it is evidence-only until a separate human decision changes
+Constitution §2.
+
 ## Budget
 
 - Target monthly data budget: **USD 40/month**.
@@ -63,6 +73,39 @@ response.
    total for **both** MAIN.CGIF and OPRA.PILLAR together under this exact use.
 5. Does any total quoted above exceed **USD 100/month all-in, combined,
    recurring**? Answer yes/no explicitly, in addition to the itemization.
+5a. **Hard spending cap / overage behavior, stated exactly:** if actual usage
+    (messages, bandwidth, API calls, symbols, or any other metered dimension)
+    exceeds the plan's included allotment in a given month, what happens by
+    default — is the subscriber's account automatically billed an overage fee
+    without prior consent, is service throttled/suspended until the next
+    billing cycle, or is there a hard, pre-settable spending cap that stops
+    consumption before any additional charge is incurred? Hermes requires a
+    **hard cap** behavior (throttle/suspend, never auto-bill past the ceiling)
+    or an explicit, itemized overage rate the subscriber can bound in advance;
+    state which of these, if any, Databento supports, and how the subscriber
+    configures it.
+5b. **RTH holiday / early-close coverage, stated exactly:** does the feed
+    (both MAIN.CGIF and OPRA.PILLAR) continue to publish on U.S. market
+    holidays (it should not, since markets are closed) and on scheduled
+    early-close sessions (e.g., the day after Thanksgiving, Christmas/New
+    Year's Eve half-days)? On an early-close day, does the feed's session
+    stop at the exchange's actual early-close time, or does it keep
+    publishing/heartbeating through the normal full-session RTH window? Is
+    there a documented, machine-readable holiday/early-close calendar the
+    subscriber can consume, or must the subscriber source that calendar
+    independently?
+5c. **Exact symbol and contract-metadata mapping, stated exactly:** provide
+    the exact symbology (raw Databento symbol, `instrument_id`, and any
+    OSI-style or vendor-specific option symbol format) used to identify SPX,
+    XSP, and SPXW instruments on both products, and confirm each of the
+    following is present and unambiguous in the delivered records: underlying
+    ticker, option root, strike, expiration date, expiration/settlement time,
+    exercise style (European), settlement style (cash), and contract
+    multiplier. State how a consumer maps a raw Databento record onto exactly
+    one of `{XSP, SPX, SPXW}` without ambiguity, and how symbol/`instrument_id`
+    remapping events (e.g., a mid-life corporate-action-style symbol change,
+    if any ever apply to these index/option products) are announced in
+    advance.
 6. How many production, standby, development, certification, and
    disaster-recovery connections/hosts are included? Are cloud regions counted
    as separate sites or devices?

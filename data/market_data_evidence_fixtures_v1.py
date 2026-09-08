@@ -13,6 +13,14 @@ offline contracts in ``data.market_data_contracts_v1``. This module:
     can only ever be, ``EvidenceCertificationStatus.NOT_CERTIFIED``;
   * reads no wall clock, environment variable, network socket, broker, or
     credential — the only I/O is a local JSON file path the caller supplies.
+
+The JSON loader (``load_evidence_bundle_from_path``) closes the envelope: it
+rejects an unsupported ``schemaVersion``, any unknown/forged field at the
+top level or inside the ``"valid"`` section (so a smuggled out-of-band
+approval/certification claim there cannot be silently discarded), and any
+duplicate JSON object key anywhere in the document (so a duplicate key can
+never silently overwrite a first, potentially meaningful, value under
+"last key wins" JSON-parsing semantics).
 """
 
 from __future__ import annotations
@@ -61,6 +69,33 @@ class EvidenceLoadError(ValueError):
 
 class AmbiguousEvidenceDuplicateError(EvidenceLoadError):
     """Raised when two records in the same batch share an identity key."""
+
+
+# --- Envelope closure (schemaVersion, unknown/forged fields, dup keys) ---------
+
+SUPPORTED_ENVELOPE_SCHEMA_VERSION = 1
+_ALLOWED_TOP_LEVEL_FIELDS = frozenset({"schemaVersion", "description", "valid", "invalid"})
+_ALLOWED_VALID_SECTION_FIELDS = frozenset({"underlying_observations", "option_observations"})
+
+
+def _reject_duplicate_object_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """``json.loads`` ``object_pairs_hook``: fail closed on any duplicate key.
+
+    Stdlib ``json`` silently keeps only the last value for a duplicate object
+    key ("last key wins"). That could let a duplicated field silently
+    overwrite a first, meaningful value (for example a real assertion hidden
+    behind a later, differently-valued duplicate of the same key). This hook
+    runs for every JSON object in the document, at every nesting depth, so no
+    duplicate anywhere in the file can be silently resolved.
+    """
+    seen: set[str] = set()
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in seen:
+            raise EvidenceLoadError(f"duplicate JSON object key {key!r} is not allowed")
+        seen.add(key)
+        result[key] = value
+    return result
 
 
 @dataclass(frozen=True)
@@ -138,17 +173,45 @@ def load_evidence_bundle_from_path(path: Path) -> EvidenceBundle:
     top-level object with a ``"valid"`` key holding ``"underlying_observations"``
     and ``"option_observations"`` arrays — see
     ``tests/fixtures/market_data_evidence_v1.json``.
+
+    Fails closed, before any per-record parsing, on: malformed JSON; a
+    duplicate JSON object key anywhere in the document; a non-object top
+    level; an unsupported/missing ``schemaVersion``; an unknown/forged field
+    at the top level or inside ``"valid"`` (so a smuggled out-of-band
+    approval/certification claim there is rejected, not silently ignored);
+    or a missing/malformed ``"valid"`` section.
     """
     text = Path(path).read_text(encoding="utf-8")
     try:
-        raw = json.loads(text)
+        raw = json.loads(text, object_pairs_hook=_reject_duplicate_object_keys)
     except json.JSONDecodeError as exc:
         raise EvidenceLoadError(f"fixture file is not valid JSON: {exc}") from exc
     if not isinstance(raw, dict):
         raise EvidenceLoadError("fixture file must contain a top-level JSON object")
+
+    unknown_top_level = sorted(set(raw) - _ALLOWED_TOP_LEVEL_FIELDS)
+    if unknown_top_level:
+        raise EvidenceLoadError(
+            f"fixture file contains unknown/forged top-level field(s): {unknown_top_level}"
+        )
+
+    schema_version = raw.get("schemaVersion")
+    if schema_version != SUPPORTED_ENVELOPE_SCHEMA_VERSION:
+        raise EvidenceLoadError(
+            f"unsupported fixture schemaVersion {schema_version!r}; expected "
+            f"{SUPPORTED_ENVELOPE_SCHEMA_VERSION}"
+        )
+
     valid = raw.get("valid")
     if not isinstance(valid, dict):
         raise EvidenceLoadError("fixture file is missing a 'valid' evidence section")
+
+    unknown_valid_fields = sorted(set(valid) - _ALLOWED_VALID_SECTION_FIELDS)
+    if unknown_valid_fields:
+        raise EvidenceLoadError(
+            f"fixture 'valid' section contains unknown/forged field(s): {unknown_valid_fields}"
+        )
+
     underlying_observations = valid.get("underlying_observations")
     option_observations = valid.get("option_observations")
     if not isinstance(underlying_observations, list) or not isinstance(option_observations, list):

@@ -78,36 +78,61 @@ session's bounds are exactly what the caller supplies. This is a deliberate,
 documented gap: **production calendar verification (holidays, early closes,
 DST, exchange-published session schedules) is explicitly deferred** to a
 future, separately-certified calendar source. `EvidenceSession` only proves
-internal consistency (end after start, non-blank provenance) of whatever bounds
-it is given — it never asserts that those bounds are the true exchange
+internal consistency (end after start, non-blank provenance, UTC-offset bounds,
+and a `session_date` that matches both bounds' calendar date) of whatever
+bounds it is given — it never asserts that those bounds are the true exchange
 calendar for that date.
 
+Every timestamp field in this module — `EvidenceSession.rth_start`/`rth_end`
+and every observation's `event_ts`/`receive_ts`/`expiration_date`/
+`last_trading_time` — must carry a UTC (`+00:00`) offset; any other offset is
+rejected explicitly at construction rather than silently normalized or
+accepted, so the module never has to guess what "the same instant" means
+across mixed offsets.
+
 Both observation types require their `event_ts` and `receive_ts` to fall
-inside the record's own `session` RTH window, and keep three timestamp
-concepts structurally distinct: the session date (via `EvidenceSession.
-session_date`), the option's `expiration_date`, and its `last_trading_time`.
+inside the record's own `session` RTH window, and to be no later than the
+option's own `last_trading_time` — an observation timestamped after a
+contract's last trading time is rejected as internally contradictory evidence
+for that contract. The three timestamp concepts stay structurally distinct:
+the session date (via `EvidenceSession.session_date`), the option's
+`expiration_date`, and its `last_trading_time`.
 
 ## Fail-closed validation surface
 
 Construction (a `pydantic.ValidationError`) rejects: missing/blank identity
 fields (`provider`, `source_product`, `source_symbol`); a conflicting
 option-root/underlying pairing; an out-of-session `event_ts`/`receive_ts`; a
-naive timestamp (every timestamp field is `AwareDatetime`); `receive_ts`
-before `event_ts`; a nonfinite/non-positive price or negative size (Pydantic
-`Field` numeric constraints, matching the existing `LiquidityGate`/
-`ContractMetadata` convention); an incomplete or crossed NBBO; an unresolved
-sequence gap/duplicate/out-of-order record; an unresolved (pending) price
-correction; a delayed or unverified delivery classification; and any forged
-extra field (`extra="forbid"`, inherited from `schemas.base.HermesModel` —
-this is what rejects a smuggled `"certification_status": "CERTIFIED"` claim on
-a raw payload).
+naive timestamp (every timestamp field is `AwareDatetime`); a non-UTC-offset
+timestamp; a `session_date` that does not match its own `rth_start`/`rth_end`
+calendar date; `receive_ts` before `event_ts`; an `event_ts`/`receive_ts`
+after the option's `last_trading_time`; a nonfinite/non-positive price or
+negative size (Pydantic `Field` numeric constraints, matching the existing
+`LiquidityGate`/`ContractMetadata` convention); an incomplete or crossed NBBO;
+an unresolved sequence gap/duplicate/out-of-order record; an unresolved
+(pending) price correction; a delayed or unverified delivery classification;
+and any forged extra field (`extra="forbid"`, inherited from
+`schemas.base.HermesModel` — this is what rejects a smuggled
+`"certification_status": "CERTIFIED"` claim on a raw payload).
 
 Staleness/future-timestamp checks are **not** construction-time — they require
 an explicit caller-supplied `as_of` (`freshness_reason` / `is_fresh_as_of`),
 mirroring `schemas.broker_data_snapshot.BrokerDataSnapshot`, so replay stays
-deterministic and no wall clock is ever read inside either module. The
-freshness ceilings (`MAX_QUOTE_AGE_MS_NORMAL`, `MAX_UNDERLYING_PRICE_AGE_MS`)
-are **imported from** `schemas.broker_data_snapshot`, not duplicated, so this
+deterministic and no wall clock is ever read inside either module. Both
+`event_ts` and `receive_ts` are checked against the ceiling — an old source
+event that was only just received is still stale, not fresh — using exact
+`timedelta` comparisons rather than truncated integer-millisecond math, so a
+sub-millisecond overage past the ceiling cannot be silently rounded away. An
+option observation's freshness check requires the caller to state, explicitly,
+whether the Constitution §10 late-day zero-DTE 500ms ceiling applies
+(`zero_dte_after_2pm_ct`, a required keyword-only argument with no default);
+there is no permissive default that could silently waive the tighter limit. An
+optional `max_age_ms` override on either observation type may only *tighten*,
+never widen, the applicable ceiling — a `bool`, non-`int`, non-positive, or
+ceiling-exceeding override raises rather than being coerced or clamped. The
+freshness ceilings (`MAX_QUOTE_AGE_MS_NORMAL`,
+`MAX_QUOTE_AGE_MS_0DTE_AFTER_2PM_CT`, `MAX_UNDERLYING_PRICE_AGE_MS`) are
+**imported from** `schemas.broker_data_snapshot`, not duplicated, so this
 evidence layer cannot silently drift from the Constitution §10 limits the
 Gateway itself enforces.
 
@@ -117,6 +142,20 @@ identity key) are detected by the loader (`build_evidence_bundle` /
 `load_evidence_bundle_from_path`), which raises
 `AmbiguousEvidenceDuplicateError` — a single-record contract cannot detect this
 on its own.
+
+## Loader envelope closure
+
+`load_evidence_bundle_from_path` closes the JSON envelope before any
+per-record parsing happens: it rejects a missing or unsupported
+`schemaVersion` (only `1` is currently supported); any unknown/forged field at
+the document's top level or inside the `"valid"` section (so a smuggled
+out-of-band approval/certification claim placed there, rather than inside an
+individual record, cannot be silently discarded and cannot silently pass
+through); and any duplicate JSON object key anywhere in the document (parsed
+via a custom `object_pairs_hook` so stdlib `json`'s default "last key wins"
+behavior can never silently resolve a duplicated field on its own). All of
+these raise `EvidenceLoadError` and fail closed before `build_evidence_bundle`
+ever runs.
 
 ## Fixtures and tests
 
@@ -129,13 +168,19 @@ purely in Python (no file I/O), deterministically from the caller-supplied
 `as_of`.
 
 `tests/test_market_data_contracts_and_fixtures_v1.py` is rejection-first:
-malformed/ambiguous evidence, provenance, scope, sessions, timestamp bounds,
-gaps/corrections, deterministic replay, forged approval claims, and
-noncertifying isolation (source-inspection tests assert neither module ever
-references `SecondaryFeedCertification`, `CertifiedFeedToken`, `brokers`,
-`gateway`, `os.environ`, `requests`, or `socket`, and never reuses
-`make_xsp_fixture`/`certified_feed`). These tests prove parser behavior only —
-never actual feed coverage, latency, source independence, or licensing.
+malformed/ambiguous evidence, provenance, scope, sessions (mismatched
+`session_date`, non-UTC offsets), timestamp bounds, post-expiration
+observations, freshness boundaries (stale-event-with-fresh-receive,
+exact-ceiling-vs-fraction-over, invalid/widened `max_age_ms` overrides,
+late-day zero-DTE tightening), gaps/corrections, deterministic replay, forged
+approval claims, loader envelope closure (unsupported/missing
+`schemaVersion`, unknown/forged top-level and `"valid"`-section fields,
+duplicate JSON object keys), and noncertifying isolation (source-inspection
+tests assert neither module ever references `SecondaryFeedCertification`,
+`CertifiedFeedToken`, `brokers`, `gateway`, `os.environ`, `requests`, or
+`socket`, and never reuses `make_xsp_fixture`/`certified_feed`). These tests
+prove parser behavior only — never actual feed coverage, latency, source
+independence, or licensing.
 
 ## Relationship to the market-data delivery decision
 

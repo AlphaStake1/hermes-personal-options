@@ -18,6 +18,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -39,6 +40,7 @@ from data.market_data_contracts_v1 import (
     UnderlyingValueKind,
 )
 from data.market_data_evidence_fixtures_v1 import (
+    SUPPORTED_ENVELOPE_SCHEMA_VERSION,
     AmbiguousEvidenceDuplicateError,
     EvidenceBundle,
     EvidenceCertificationStatus,
@@ -64,7 +66,7 @@ def _session() -> EvidenceSession:
     )
 
 
-def _raw_fixture() -> dict:
+def _raw_fixture() -> dict[str, Any]:
     return json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
 
 
@@ -106,6 +108,29 @@ def test_session_contains_requires_aware_timestamp():
         _session().contains(datetime(2026, 6, 17, 17, 30))  # naive
 
 
+def test_session_rejects_session_date_mismatch_against_rth_bounds():
+    with pytest.raises(ValidationError) as exc_info:
+        EvidenceSession(
+            session_date=date(2026, 6, 18),  # off-by-one vs the rth_start/rth_end date
+            rth_start=datetime(2026, 6, 17, 13, 30, tzinfo=UTC),
+            rth_end=datetime(2026, 6, 17, 20, 0, tzinfo=UTC),
+            provenance="TEST",
+        )
+    assert "SESSION_DATE_MISMATCH" in str(exc_info.value)
+
+
+def test_session_rejects_non_utc_offset_bounds():
+    non_utc = timezone(timedelta(hours=-5))
+    with pytest.raises(ValidationError) as exc_info:
+        EvidenceSession(
+            session_date=SESSION_DATE,
+            rth_start=datetime(2026, 6, 17, 8, 30, tzinfo=non_utc),
+            rth_end=datetime(2026, 6, 17, 15, 0, tzinfo=non_utc),
+            provenance="TEST",
+        )
+    assert "NON_UTC_TIMESTAMP" in str(exc_info.value)
+
+
 # --- Direct-construction rejection: identity, ordering, scope -----------------
 
 
@@ -130,20 +155,20 @@ def _underlying_kwargs(**over: object) -> dict[str, object]:
 
 
 def test_valid_underlying_observation_constructs():
-    obs = UnderlyingEvidenceObservation(**_underlying_kwargs())
+    obs = UnderlyingEvidenceObservation.model_validate(_underlying_kwargs())
     assert obs.underlying is Underlying.SPX
     assert not obs.is_within_trading_scope  # SPX is not Phase-1 trading scope
 
 
 def test_underlying_observation_rejects_blank_provider():
     with pytest.raises(ValidationError):
-        UnderlyingEvidenceObservation(**_underlying_kwargs(provider="   "))
+        UnderlyingEvidenceObservation.model_validate(_underlying_kwargs(provider="   "))
 
 
 def test_underlying_observation_rejects_receive_before_event():
     with pytest.raises(ValidationError):
-        UnderlyingEvidenceObservation(
-            **_underlying_kwargs(
+        UnderlyingEvidenceObservation.model_validate(
+            _underlying_kwargs(
                 event_ts=NOW,
                 receive_ts=NOW - timedelta(milliseconds=1),
             )
@@ -152,8 +177,8 @@ def test_underlying_observation_rejects_receive_before_event():
 
 def test_underlying_observation_rejects_out_of_session_event():
     with pytest.raises(ValidationError):
-        UnderlyingEvidenceObservation(
-            **_underlying_kwargs(
+        UnderlyingEvidenceObservation.model_validate(
+            _underlying_kwargs(
                 event_ts=datetime(2026, 6, 17, 21, 0, tzinfo=UTC),
                 receive_ts=datetime(2026, 6, 17, 21, 0, tzinfo=UTC),
             )
@@ -162,26 +187,30 @@ def test_underlying_observation_rejects_out_of_session_event():
 
 def test_underlying_observation_rejects_etf_proxy_substitution():
     with pytest.raises(ValidationError) as exc_info:
-        UnderlyingEvidenceObservation(**_underlying_kwargs(value_kind=UnderlyingValueKind.ETF_PROXY))
+        UnderlyingEvidenceObservation.model_validate(
+            _underlying_kwargs(value_kind=UnderlyingValueKind.ETF_PROXY)
+        )
     assert "PROXY_SUBSTITUTION" in str(exc_info.value)
 
 
 def test_underlying_observation_rejects_delayed_delivery():
     with pytest.raises(ValidationError):
-        UnderlyingEvidenceObservation(
-            **_underlying_kwargs(delivery_status=DeliveryStatus.DELAYED)
+        UnderlyingEvidenceObservation.model_validate(
+            _underlying_kwargs(delivery_status=DeliveryStatus.DELAYED)
         )
 
 
 def test_underlying_observation_rejects_unresolved_gap():
     with pytest.raises(ValidationError):
-        UnderlyingEvidenceObservation(**_underlying_kwargs(sequence_status=SequenceStatus.GAP))
+        UnderlyingEvidenceObservation.model_validate(
+            _underlying_kwargs(sequence_status=SequenceStatus.GAP)
+        )
 
 
 def test_underlying_observation_rejects_pending_correction():
     with pytest.raises(ValidationError):
-        UnderlyingEvidenceObservation(
-            **_underlying_kwargs(correction_status=CorrectionStatus.PENDING_UNRESOLVED)
+        UnderlyingEvidenceObservation.model_validate(
+            _underlying_kwargs(correction_status=CorrectionStatus.PENDING_UNRESOLVED)
         )
 
 
@@ -219,14 +248,14 @@ def _option_kwargs(**over: object) -> dict[str, object]:
 
 
 def test_valid_option_observation_constructs_and_is_in_scope():
-    obs = OptionEvidenceObservation(**_option_kwargs())
+    obs = OptionEvidenceObservation.model_validate(_option_kwargs())
     assert obs.is_within_trading_scope
 
 
 def test_option_observation_rejects_last_trading_time_after_expiration():
     with pytest.raises(ValidationError):
-        OptionEvidenceObservation(
-            **_option_kwargs(
+        OptionEvidenceObservation.model_validate(
+            _option_kwargs(
                 expiration_date=NOW,
                 last_trading_time=NOW + timedelta(seconds=1),
             )
@@ -235,21 +264,23 @@ def test_option_observation_rejects_last_trading_time_after_expiration():
 
 def test_option_observation_rejects_conflicting_root_underlying_mapping():
     with pytest.raises(ValidationError) as exc_info:
-        OptionEvidenceObservation(
-            **_option_kwargs(option_root=EvidenceOptionRoot.SPXW, underlying=Underlying.XSP)
+        OptionEvidenceObservation.model_validate(
+            _option_kwargs(option_root=EvidenceOptionRoot.SPXW, underlying=Underlying.XSP)
         )
     assert "CONFLICTING_IDENTITY" in str(exc_info.value)
 
 
 def test_option_observation_rejects_crossed_nbbo():
     with pytest.raises(ValidationError) as exc_info:
-        OptionEvidenceObservation(**_option_kwargs(bid=Decimal("0.60"), ask=Decimal("0.52")))
+        OptionEvidenceObservation.model_validate(
+            _option_kwargs(bid=Decimal("0.60"), ask=Decimal("0.52"))
+        )
     assert "CROSSED_NBBO" in str(exc_info.value)
 
 
 def test_option_observation_rejects_incomplete_nbbo():
     with pytest.raises(ValidationError) as exc_info:
-        OptionEvidenceObservation(**_option_kwargs(ask=None, ask_size=None))
+        OptionEvidenceObservation.model_validate(_option_kwargs(ask=None, ask_size=None))
     assert "INCOMPLETE_NBBO" in str(exc_info.value)
 
 
@@ -263,8 +294,8 @@ def test_option_observation_rejects_extra_field_forged_approval_claim():
 
 
 def test_spxw_maps_to_spx_and_is_not_within_xsp_trading_scope():
-    obs = OptionEvidenceObservation(
-        **_option_kwargs(
+    obs = OptionEvidenceObservation.model_validate(
+        _option_kwargs(
             option_root=EvidenceOptionRoot.SPXW,
             underlying=Underlying.SPX,
             source_symbol="SPXW_TEST_PUT_4950",
@@ -277,28 +308,161 @@ def test_spxw_maps_to_spx_and_is_not_within_xsp_trading_scope():
     assert not hasattr(Underlying, "SPXW")
 
 
+def test_option_observation_rejects_event_ts_after_last_trading_time():
+    with pytest.raises(ValidationError) as exc_info:
+        OptionEvidenceObservation.model_validate(
+            _option_kwargs(
+                expiration_date=NOW - timedelta(minutes=1),
+                last_trading_time=NOW - timedelta(minutes=1),
+                event_ts=NOW,
+                receive_ts=NOW,
+            )
+        )
+    assert "POST_EXPIRATION_OBSERVATION" in str(exc_info.value)
+
+
+def test_option_observation_rejects_receive_ts_after_last_trading_time():
+    with pytest.raises(ValidationError) as exc_info:
+        OptionEvidenceObservation.model_validate(
+            _option_kwargs(
+                expiration_date=NOW - timedelta(minutes=1),
+                last_trading_time=NOW - timedelta(minutes=1),
+                event_ts=NOW - timedelta(minutes=2),
+                receive_ts=NOW,
+            )
+        )
+    assert "POST_EXPIRATION_OBSERVATION" in str(exc_info.value)
+
+
+def test_option_observation_rejects_non_utc_offset_timestamp():
+    non_utc = timezone(timedelta(hours=-5))
+    with pytest.raises(ValidationError) as exc_info:
+        OptionEvidenceObservation.model_validate(
+            _option_kwargs(
+                event_ts=(NOW - timedelta(milliseconds=200)).astimezone(non_utc),
+            )
+        )
+    assert "NON_UTC_TIMESTAMP" in str(exc_info.value)
+
+
 # --- Freshness: caller-supplied as_of only, never wall clock ------------------
 
 
 def test_option_freshness_reason_requires_aware_as_of():
-    obs = OptionEvidenceObservation(**_option_kwargs())
+    obs = OptionEvidenceObservation.model_validate(_option_kwargs())
     with pytest.raises(ValueError):
-        obs.freshness_reason(datetime(2026, 6, 17, 17, 31))  # naive
+        obs.freshness_reason(
+            datetime(2026, 6, 17, 17, 31), zero_dte_after_2pm_ct=False
+        )  # naive
 
 
 def test_option_is_fresh_and_stale_and_future_relative_to_as_of():
-    obs = OptionEvidenceObservation(**_option_kwargs())
-    assert obs.is_fresh_as_of(NOW)
-    assert obs.freshness_reason(NOW - timedelta(milliseconds=500)) is (
-        EvidenceFreshnessReason.FUTURE_TIMESTAMP
-    )
-    assert obs.freshness_reason(NOW + timedelta(seconds=5)) is EvidenceFreshnessReason.STALE
+    obs = OptionEvidenceObservation.model_validate(_option_kwargs())
+    assert obs.is_fresh_as_of(NOW, zero_dte_after_2pm_ct=False)
+    assert obs.freshness_reason(
+        NOW - timedelta(milliseconds=500), zero_dte_after_2pm_ct=False
+    ) is EvidenceFreshnessReason.FUTURE_TIMESTAMP
+    assert obs.freshness_reason(
+        NOW + timedelta(seconds=5), zero_dte_after_2pm_ct=False
+    ) is EvidenceFreshnessReason.STALE
 
 
 def test_underlying_is_fresh_and_stale_relative_to_as_of():
-    obs = UnderlyingEvidenceObservation(**_underlying_kwargs())
+    obs = UnderlyingEvidenceObservation.model_validate(_underlying_kwargs())
     assert obs.is_fresh_as_of(NOW)
     assert obs.freshness_reason(NOW + timedelta(seconds=5)) is EvidenceFreshnessReason.STALE
+
+
+def test_underlying_freshness_rejects_stale_event_with_fresh_receive():
+    # receive_ts alone looks fresh (10ms old); event_ts is 2s old and must dominate.
+    obs = UnderlyingEvidenceObservation.model_validate(
+        _underlying_kwargs(
+            event_ts=NOW - timedelta(seconds=2),
+            receive_ts=NOW - timedelta(milliseconds=10),
+        )
+    )
+    assert obs.freshness_reason(NOW) is EvidenceFreshnessReason.STALE
+
+
+def test_option_freshness_rejects_stale_event_with_fresh_receive():
+    obs = OptionEvidenceObservation.model_validate(
+        _option_kwargs(
+            event_ts=NOW - timedelta(seconds=2),
+            receive_ts=NOW - timedelta(milliseconds=10),
+        )
+    )
+    assert obs.freshness_reason(NOW, zero_dte_after_2pm_ct=False) is EvidenceFreshnessReason.STALE
+
+
+def test_underlying_freshness_exact_ceiling_boundary_vs_fraction_over():
+    obs = UnderlyingEvidenceObservation.model_validate(
+        _underlying_kwargs(
+            event_ts=NOW - timedelta(milliseconds=1),
+            receive_ts=NOW - timedelta(milliseconds=1),
+        )
+    )
+    exactly_at_ceiling = obs.receive_ts + timedelta(milliseconds=500)
+    assert obs.is_fresh_as_of(exactly_at_ceiling)
+    just_over_ceiling = exactly_at_ceiling + timedelta(microseconds=1)
+    assert obs.freshness_reason(just_over_ceiling) is EvidenceFreshnessReason.STALE
+
+
+def test_option_freshness_exact_ceiling_boundary_vs_fraction_over():
+    obs = OptionEvidenceObservation.model_validate(
+        _option_kwargs(
+            event_ts=NOW - timedelta(milliseconds=1),
+            receive_ts=NOW - timedelta(milliseconds=1),
+        )
+    )
+    exactly_at_ceiling = obs.receive_ts + timedelta(milliseconds=1000)
+    assert obs.is_fresh_as_of(exactly_at_ceiling, zero_dte_after_2pm_ct=False)
+    just_over_ceiling = exactly_at_ceiling + timedelta(microseconds=1)
+    assert (
+        obs.freshness_reason(just_over_ceiling, zero_dte_after_2pm_ct=False)
+        is EvidenceFreshnessReason.STALE
+    )
+
+
+def test_option_freshness_zero_dte_after_2pm_ct_tightens_ceiling():
+    obs = OptionEvidenceObservation.model_validate(
+        _option_kwargs(
+            event_ts=NOW - timedelta(milliseconds=600),
+            receive_ts=NOW - timedelta(milliseconds=600),
+        )
+    )
+    assert obs.is_fresh_as_of(NOW, zero_dte_after_2pm_ct=False)
+    assert (
+        obs.freshness_reason(NOW, zero_dte_after_2pm_ct=True) is EvidenceFreshnessReason.STALE
+    )
+
+
+@pytest.mark.parametrize("bad_override", [True, False, 0, -1, 1001, "500", 500.0])
+def test_option_freshness_rejects_invalid_or_widened_max_age_override(bad_override):
+    obs = OptionEvidenceObservation.model_validate(_option_kwargs())
+    with pytest.raises(ValueError):
+        obs.freshness_reason(NOW, zero_dte_after_2pm_ct=False, max_age_ms=bad_override)
+
+
+@pytest.mark.parametrize("bad_override", [True, False, 0, -1, 501, "500", 500.0])
+def test_underlying_freshness_rejects_invalid_or_widened_max_age_override(bad_override):
+    obs = UnderlyingEvidenceObservation.model_validate(_underlying_kwargs())
+    with pytest.raises(ValueError):
+        obs.freshness_reason(NOW, max_age_ms=bad_override)
+
+
+def test_option_freshness_max_age_override_may_only_tighten():
+    obs = OptionEvidenceObservation.model_validate(
+        _option_kwargs(
+            event_ts=NOW - timedelta(milliseconds=600),
+            receive_ts=NOW - timedelta(milliseconds=600),
+        )
+    )
+    # 1000ms normal ceiling would call this fresh; a tighter 500ms override must not.
+    assert obs.is_fresh_as_of(NOW, zero_dte_after_2pm_ct=False)
+    assert (
+        obs.freshness_reason(NOW, zero_dte_after_2pm_ct=False, max_age_ms=500)
+        is EvidenceFreshnessReason.STALE
+    )
 
 
 # --- Deterministic synthetic bundle ---------------------------------------------
@@ -436,6 +600,64 @@ def test_load_bundle_rejects_missing_valid_section(tmp_path):
 def test_load_bundle_rejects_non_object_top_level(tmp_path):
     bad = tmp_path / "bad3.json"
     bad.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+    with pytest.raises(EvidenceLoadError):
+        load_evidence_bundle_from_path(bad)
+
+
+def test_load_bundle_rejects_unsupported_schema_version(tmp_path):
+    payload = _raw_fixture()
+    payload["schemaVersion"] = SUPPORTED_ENVELOPE_SCHEMA_VERSION + 1
+    bad = tmp_path / "unsupported_schema.json"
+    bad.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(EvidenceLoadError):
+        load_evidence_bundle_from_path(bad)
+
+
+def test_load_bundle_rejects_missing_schema_version(tmp_path):
+    payload = _raw_fixture()
+    del payload["schemaVersion"]
+    bad = tmp_path / "missing_schema.json"
+    bad.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(EvidenceLoadError):
+        load_evidence_bundle_from_path(bad)
+
+
+def test_load_bundle_rejects_unknown_top_level_field(tmp_path):
+    payload = _raw_fixture()
+    payload["certification_status"] = "CERTIFIED"
+    bad = tmp_path / "forged_top_level.json"
+    bad.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(EvidenceLoadError):
+        load_evidence_bundle_from_path(bad)
+
+
+def test_load_bundle_rejects_unknown_field_inside_valid_section(tmp_path):
+    payload = _raw_fixture()
+    payload["valid"]["certification_status"] = "CERTIFIED"
+    bad = tmp_path / "forged_valid_section.json"
+    bad.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(EvidenceLoadError):
+        load_evidence_bundle_from_path(bad)
+
+
+def test_load_bundle_rejects_duplicate_top_level_json_key(tmp_path):
+    bad = tmp_path / "dup_key.json"
+    bad.write_text(
+        '{"schemaVersion": 1, "schemaVersion": 1, "valid": '
+        '{"underlying_observations": [], "option_observations": []}}',
+        encoding="utf-8",
+    )
+    with pytest.raises(EvidenceLoadError):
+        load_evidence_bundle_from_path(bad)
+
+
+def test_load_bundle_rejects_duplicate_nested_json_key(tmp_path):
+    bad = tmp_path / "dup_nested_key.json"
+    bad.write_text(
+        '{"schemaVersion": 1, "valid": {"underlying_observations": [], '
+        '"option_observations": [], "option_observations": []}}',
+        encoding="utf-8",
+    )
     with pytest.raises(EvidenceLoadError):
         load_evidence_bundle_from_path(bad)
 
