@@ -87,13 +87,13 @@ response.
 5b. **RTH holiday / early-close coverage, stated exactly:** does the feed
     (both MAIN.CGIF and OPRA.PILLAR) continue to publish on U.S. market
     holidays (it should not, since markets are closed) and on scheduled
-    early-close sessions (e.g., the day after Thanksgiving, Christmas/New
-    Year's Eve half-days)? On an early-close day, does the feed's session
+    early-close sessions? On an early-close day, does the feed's session
     stop at the exchange's actual early-close time, or does it keep
-    publishing/heartbeating through the normal full-session RTH window? Is
-    there a documented, machine-readable holiday/early-close calendar the
-    subscriber can consume, or must the subscriber source that calendar
-    independently?
+    publishing/heartbeating through the normal full-session RTH window?
+    Provide the applicable official RTH holiday/early-close calendar (the
+    exact holiday and early-close dates the feed observes), and state
+    whether it is available as a documented, machine-readable calendar the
+    subscriber can consume, or must be sourced independently.
 5c. **Exact symbol and contract-metadata mapping, stated exactly:** provide
     the exact symbology (raw Databento symbol, `instrument_id`, and any
     OSI-style or vendor-specific option symbol format) used to identify SPX,

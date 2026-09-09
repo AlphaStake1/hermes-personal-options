@@ -196,7 +196,10 @@ def load_evidence_bundle_from_path(path: Path) -> EvidenceBundle:
         )
 
     schema_version = raw.get("schemaVersion")
-    if schema_version != SUPPORTED_ENVELOPE_SCHEMA_VERSION:
+    # ``bool`` is an ``int`` subclass and ``1.0 == 1`` in Python, so plain ``!=``
+    # would silently accept ``True`` or ``1.0`` as schema version 1; require the
+    # exact JSON type in addition to the value.
+    if type(schema_version) is not int or schema_version != SUPPORTED_ENVELOPE_SCHEMA_VERSION:
         raise EvidenceLoadError(
             f"unsupported fixture schemaVersion {schema_version!r}; expected "
             f"{SUPPORTED_ENVELOPE_SCHEMA_VERSION}"

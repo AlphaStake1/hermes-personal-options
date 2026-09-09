@@ -622,6 +622,27 @@ def test_load_bundle_rejects_missing_schema_version(tmp_path):
         load_evidence_bundle_from_path(bad)
 
 
+@pytest.mark.parametrize(
+    "bad_schema_version", [True, False, 1.0, 0, 2, "1", None]
+)
+def test_load_bundle_rejects_non_exact_integer_schema_version(tmp_path, bad_schema_version):
+    payload = _raw_fixture()
+    payload["schemaVersion"] = bad_schema_version
+    bad = tmp_path / "non_exact_schema_version.json"
+    bad.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(EvidenceLoadError):
+        load_evidence_bundle_from_path(bad)
+
+
+def test_load_bundle_accepts_exact_integer_schema_version_one(tmp_path):
+    payload = _raw_fixture()
+    payload["schemaVersion"] = 1
+    ok = tmp_path / "exact_schema_version.json"
+    ok.write_text(json.dumps(payload), encoding="utf-8")
+    bundle = load_evidence_bundle_from_path(ok)
+    assert bundle.certification_status is EvidenceCertificationStatus.NOT_CERTIFIED
+
+
 def test_load_bundle_rejects_unknown_top_level_field(tmp_path):
     payload = _raw_fixture()
     payload["certification_status"] = "CERTIFIED"
