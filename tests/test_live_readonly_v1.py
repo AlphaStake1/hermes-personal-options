@@ -95,6 +95,16 @@ def test_committed_env_template_is_a_valid_fail_closed_shape():
             _env(PAPER_SUBMIT_ENABLED="true"),
             "live_readonly requires PAPER_SUBMIT_ENABLED=false",
         ),
+        # live_readonly acts on nothing: it generates no candidates and mints no order
+        # tickets, so both feature flags must be off (roadmap §Phase 15).
+        (
+            _env(CANDIDATE_GENERATION_ENABLED="true"),
+            "live_readonly requires CANDIDATE_GENERATION_ENABLED=false",
+        ),
+        (
+            _env(ORDER_TICKETING_ENABLED="true"),
+            "live_readonly requires ORDER_TICKETING_ENABLED=false",
+        ),
         # Live submit is rejected in every environment (global step-1 invariant).
         (_env(LIVE_SUBMIT_ENABLED="true"), "LIVE_SUBMIT_ENABLED must be false"),
         # Broker mode must match the environment.

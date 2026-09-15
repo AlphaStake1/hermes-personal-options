@@ -117,6 +117,39 @@ def _valid_candidate_payload(**overrides) -> dict:
     return payload
 
 
+def _valid_candidate_payload_json_shaped(**overrides) -> dict:
+    """The same valid PUT_CREDIT candidate as a realistic agent-SDK tool payload.
+
+    A real SDK tool call arrives as a decoded JSON object: string enums and string decimals,
+    not native ``Enum`` / ``Decimal`` objects. This is the shape that the strict Python-mode
+    validator rejects but the exposed proposal tool must accept.
+    """
+    payload = {
+        "underlying": "XSP",
+        "direction": "PUT_CREDIT",
+        "short_leg": {
+            "side": "SHORT",
+            "option_type": "PUT",
+            "strike": "500",
+            "delta": "-0.08",
+            "contracts": 1,
+        },
+        "long_leg": {
+            "side": "LONG",
+            "option_type": "PUT",
+            "strike": "495",
+            "delta": "-0.04",
+            "contracts": 1,
+        },
+        "net_credit": "1.00",
+        "multiplier": 100,
+        "dte": 2,
+        "rationale_id": "rationale-test-json-0001",
+    }
+    payload.update(overrides)
+    return payload
+
+
 def _reject_artifact(*codes: ReasonCode) -> AuditArtifact:
     return AuditArtifact(
         artifact_id="gw-reject-test-0001",
@@ -342,6 +375,38 @@ def test_propose_tool_delegates_to_boundary():
     )
     with pytest.raises(CandidateBoundaryError):
         propose_candidate_trade_intent(_valid_candidate_payload(order_type="MARKET"))
+
+
+def test_propose_tool_accepts_realistic_sdk_json_shaped_input():
+    # A real agent-SDK tool call delivers JSON-native string enums/decimals, not native
+    # Enum/Decimal objects. The exposed proposal tool must accept that shape (Phase 14
+    # medium fix) and still emit only an unroutable, token-free candidate.
+    candidate = propose_candidate_trade_intent(_valid_candidate_payload_json_shaped())
+    assert isinstance(candidate, CandidateTradeIntent)
+    assert candidate.status is IntentStatus.CANDIDATE
+    assert candidate.underlying is Underlying.XSP
+    assert candidate.direction is SpreadDirection.PUT_CREDIT
+    assert candidate.net_credit == Decimal("1.00")
+    assert not hasattr(candidate, "order_type")
+    assert not hasattr(candidate, "route_mode")
+
+
+def test_propose_tool_fails_closed_on_smuggled_field_in_json_shaped_input():
+    # The JSON-normalizing path keeps the strict, extra="forbid" contract: a smuggled
+    # order_type / approval token in realistic SDK input is still a hard rejection.
+    with pytest.raises(CandidateBoundaryError):
+        propose_candidate_trade_intent(
+            _valid_candidate_payload_json_shaped(order_type="MARKET")
+        )
+    with pytest.raises(CandidateBoundaryError):
+        propose_candidate_trade_intent(
+            _valid_candidate_payload_json_shaped(approved_heat="9.99")
+        )
+
+
+def test_propose_tool_rejects_non_mapping_input():
+    with pytest.raises(CandidateBoundaryError):
+        propose_candidate_trade_intent("not-a-mapping")  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------

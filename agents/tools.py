@@ -34,7 +34,7 @@ from storage.base import AuditStore
 from storage.models import RecordType, StoredEvent
 from strategies.base import Strategy
 
-from .candidate_boundary import parse_candidate_intent
+from .candidate_boundary import parse_candidate_intent_mapping
 from .permissions import AgentPermissionError, assert_write_path_allowed
 
 
@@ -264,11 +264,13 @@ def draft_daily_report(
 def propose_candidate_trade_intent(payload: Mapping[str, Any]) -> CandidateTradeIntent:
     """Emit a typed ``CandidateTradeIntent`` from an agent proposal (the typed boundary).
 
-    Delegates to ``agents.candidate_boundary.parse_candidate_intent``: fail-closed, strict,
-    ``extra="forbid"`` parsing. The result is unroutable and token-free by type and mints
+    Delegates to ``agents.candidate_boundary.parse_candidate_intent_mapping``: fail-closed,
+    ``extra="forbid"`` parsing through the JSON validator so a realistic agent-SDK tool
+    payload (JSON-native string enums/decimals) is accepted, while native ``Decimal`` /
+    ``Enum`` mappings keep working. The result is unroutable and token-free by type and mints
     nothing protected.
     """
-    return parse_candidate_intent(payload)
+    return parse_candidate_intent_mapping(payload)
 
 
 # ---------------------------------------------------------------------------

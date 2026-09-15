@@ -25,6 +25,7 @@ from .candidate_boundary import (
     CandidateBoundaryError,
     parse_candidate_intent,
     parse_candidate_intent_json,
+    parse_candidate_intent_mapping,
 )
 from .permissions import (
     FORBIDDEN_TOOLS,
@@ -78,6 +79,7 @@ __all__ = [
     "CandidateBoundaryError",
     "parse_candidate_intent",
     "parse_candidate_intent_json",
+    "parse_candidate_intent_mapping",
     # roles
     "AgentRole",
     "policy_for_role",
